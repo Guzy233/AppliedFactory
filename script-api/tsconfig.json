@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES5",
+    "strict": true,
+    "allowJs": true,
+    "checkJs": true,
+    "lib": ["ES2015"],
+    "noEmitOnError": true,
+    "outDir": "generated",
+    "skipLibCheck": true
+  },
+  "include": [
+    "*.ts",
+    "demo.js",
+    "factory-controller.d.ts"
+  ],
+  "exclude": [
+    "generated"
+  ]
+}

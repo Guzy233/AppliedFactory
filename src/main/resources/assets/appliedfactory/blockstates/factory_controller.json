@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "appliedfactory:block/factory_controller"
+    }
+  }
+}

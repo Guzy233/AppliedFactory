@@ -1,0 +1,19 @@
+{
+  "block.appliedfactory.factory_controller": "Factory Controller",
+  "item.appliedfactory.factory_bus": "Factory Bus",
+  "gui.appliedfactory.factory_bus.target": "Machine: %s",
+  "gui.appliedfactory.factory_bus.redstone": "Redstone level: %s",
+  "gui.appliedfactory.factory_bus.acceleration": "Acceleration cards",
+  "gui.appliedfactory.script": "Controller program",
+  "gui.appliedfactory.program": "Controller program",
+  "gui.appliedfactory.save": "Save",
+  "gui.appliedfactory.saving": "Saving…",
+  "gui.appliedfactory.save_success": "Saved",
+  "gui.appliedfactory.syntax_error": "Syntax error: %s",
+  "gui.appliedfactory.subscribe_errors": "Subscribe to errors",
+  "gui.appliedfactory.cache": "Private cache",
+  "gui.appliedfactory.storage": "Controller storage",
+  "gui.appliedfactory.patterns": "Processing patterns",
+  "gui.appliedfactory.inventory": "Player inventory",
+  "chat.appliedfactory.script_error": "Factory controller %s script error (%s): %s"
+}
