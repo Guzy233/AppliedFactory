@@ -469,6 +469,34 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public long requestedCraftingAmount(Direction side, AEKey key) {
+        var node = networkNodes.get(side);
+        var grid = node == null ? null : node.getGrid();
+        if (grid == null || !node.isOnline()) {
+            return 0;
+        }
+        return grid.getCraftingService().getRequestedAmount(key);
+    }
+
+    /**
+     * Called by the AE2 grid mixins and the bus part when a factory bus joined/left a network or
+     * its target machine changed. Event-driven replacement for the old per-tick topology
+     * fingerprint: re-runs the initializer on the next step.
+     */
+    public void onBusTopologyChanged() {
+        if (program != null) {
+            program.markEnvironmentChanged();
+        }
+    }
+
+    /** Called by the crafting CPU mixin when one of our crafting requests is cancelled. */
+    public void onCraftingRequestCanceled(UUID craftingRequestId) {
+        if (program != null) {
+            program.cancelJobs(craftingRequestId);
+        }
+    }
+
+    @Override
     public void reportScriptFailure(String stage, String message) {
         AppliedFactory.LOGGER.error("Factory {} failed: {}", stage, message);
         if (!reportedScriptFailures.add(stage + '\n' + message)
@@ -477,7 +505,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
 
         var notification = Component.translatable(
-                "chat.mefactorymanager.script_error",
+                "chat.appliedfactory.script_error",
                 Component.literal(worldPosition.toShortString()),
                 Component.literal(stage),
                 Component.literal(message)).withStyle(ChatFormatting.RED);

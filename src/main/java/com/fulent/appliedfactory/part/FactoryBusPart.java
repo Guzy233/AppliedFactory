@@ -7,6 +7,7 @@ import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryMachineAccess;
 import com.fulent.appliedfactory.menu.FactoryBusMenu;
@@ -41,6 +42,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.extensions.IPlayerExtension;
@@ -184,6 +186,27 @@ public final class FactoryBusPart
     public void onStateChanged(FactoryBusPart owner, IGridNode node, State state) {
         if (host != null) {
             host.markForUpdate();
+        }
+    }
+
+    /**
+     * AE2 forwards cable neighbor changes to its parts. When the block this bus targets changed,
+     * tell the controllers on our grid so their initializer re-runs — this replaces the bus-set
+     * and machine-info part of the old per-tick topology fingerprint.
+     */
+    @Override
+    public void onNeighborChanged(BlockGetter level, BlockPos pos, BlockPos neighbor) {
+        if (hostBlockEntity == null || side == null
+                || !neighbor.equals(hostBlockEntity.getBlockPos().relative(side))) {
+            return;
+        }
+        var node = mainNode.getNode();
+        var grid = node == null ? null : node.getGrid();
+        if (grid == null) {
+            return;
+        }
+        for (var controller : grid.getMachines(FactoryControllerBlockEntity.class)) {
+            controller.onBusTopologyChanged();
         }
     }
 
@@ -334,7 +357,7 @@ public final class FactoryBusPart
     @Override
     public boolean onUseWithoutItem(Player player, Vec3 pos) {
         if (!player.level().isClientSide && player instanceof ServerPlayer serverPlayer && side != null) {
-            var title = Component.translatable("item.mefactorymanager.factory_bus");
+            var title = Component.translatable("item.appliedfactory.factory_bus");
             ((IPlayerExtension) serverPlayer).openMenu(new SimpleMenuProvider(
                     (containerId, inventory, ignored) -> new FactoryBusMenu(containerId, inventory, this),
                     title), data -> {

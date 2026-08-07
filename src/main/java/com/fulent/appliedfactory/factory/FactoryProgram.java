@@ -22,6 +22,7 @@ import com.fulent.appliedfactory.script.ScriptHandlerRef;
 import com.fulent.appliedfactory.script.ScriptRuntime;
 import com.fulent.appliedfactory.script.ScriptStep;
 
+import appeng.api.stacks.AEKey;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
@@ -35,8 +36,9 @@ import net.minecraft.nbt.Tag;
  * that same scope.
  *
  * <p>Responsibilities: evaluating the source, running the initializer (as an in-memory
- * {@link InitializerJob}) whenever the watched topology changes, offering pattern→handler
- * bindings ({@link #compiled()}), starting processing jobs, and advancing every suspended job
+ * {@link InitializerJob}) whenever the host reports a change (grid state, bus topology),
+ * offering pattern→handler bindings ({@link #compiled()}), starting processing jobs, cancelling
+ * them when their AE crafting request is cancelled, and advancing every suspended job
  * once per server tick via {@link #step()}. A job exists only while suspended; ending a job
  * immediately removes it, handing any leftover owned resources to the recovery queue, which
  * retries returning them until the network accepts them. Recompiling ({@link #replace}) cancels
@@ -64,6 +66,14 @@ public final class FactoryProgram {
         void reportScriptFailure(String stage, String message);
 
         void markChanged();
+
+        /**
+         * Returns the total amount of {@code key} the grid attached to {@code side} is currently
+         * crafting for (0 when the side is offline or no CPU awaits it). Used to verify restored
+         * processing jobs whose cancellation callback may have been missed while the chunk was
+         * unloaded.
+         */
+        long requestedCraftingAmount(Direction side, AEKey key);
     }
 
     private final ScriptRuntime runtime;
@@ -72,14 +82,36 @@ public final class FactoryProgram {
 
     private boolean initialized;
     private boolean attempted;
-    private long lastTopology;
-    private long lastAttemptedTopology;
     private boolean environmentDirty;
+    /**
+     * Topology signature the initializer last ran against. Computed only when a change event marks
+     * the environment dirty (never per tick), and compared against the current signature so
+     * spurious events (machine interactions, channel recalcs) that leave the watched topology
+     * unchanged do not re-run the initializer.
+     */
+    private long lastSignature;
+    /**
+     * True while a re-run initializer is in flight after a real topology change. New jobs are not
+     * accepted until it completes, mirroring the old fingerprint-based behavior.
+     */
+    private boolean reinitializing;
+    /**
+     * Set when jobs are restored from disk: a crafting request may have been cancelled while the
+     * controller chunk was unloaded (the cancellation callback was missed), so the restored
+     * processing jobs are verified once against the grid's crafting service on a later step.
+     */
+    private boolean orphanCheckPending;
 
     private final List<FactoryJob> jobs = new ArrayList<>();
     private final List<RecoveryEntry> recovery = new ArrayList<>();
     private final Set<Integer> stoppedPassives = new HashSet<>();
     private final Set<UUID> reportedRecoveryFailures = new HashSet<>();
+    /**
+     * Crafting request ids reported cancelled by AE2 CPUs. Processed at the start of the next
+     * {@link #step()} so the cancellation never re-enters AE2's storage/grid services from inside
+     * their own tick.
+     */
+    private final Set<UUID> pendingCancellations = new HashSet<>();
     /**
      * The active initializer, in memory only (never persisted — after a chunk reload the
      * program simply re-initializes). Non-null while initialization is pending or suspended.
@@ -139,9 +171,9 @@ public final class FactoryProgram {
     }
 
     /**
-     * Forces the initializer to re-run on the next step even if the topology fingerprint is
-     * unchanged. Called by the host when grid state changes; the per-tick fingerprint check
-     * already covers this, the explicit call just removes the fingerprint cache hit.
+     * Forces the initializer to re-run on the next step. Called by the host on grid state
+     * changes and on bus topology events (bus added/removed, bus target changed), replacing the
+     * old per-tick topology fingerprint.
      */
     public void markEnvironmentChanged() {
         environmentDirty = true;
@@ -155,6 +187,9 @@ public final class FactoryProgram {
      * and no recovery is retried — the factory waits for its initializer.
      */
     public void step() {
+        // Cancellations are processed regardless of initialization state: a cancelled job should
+        // be cleaned up even while the factory waits for its initializer.
+        processCancellations();
         stepInitializer();
         if (!initialized) {
             return;
@@ -167,7 +202,72 @@ public final class FactoryProgram {
             }
             advance(job, now);
         }
+        checkRestoredOrphans();
         processRecovery();
+    }
+
+    /**
+     * Cancels every processing job pushed for the given AE crafting request, called by the host
+     * when a crafting CPU reports its request cancelled. The job is finished on the next
+     * {@link #step()} (see {@link #pendingCancellations}); owned resources are returned to the
+     * network like any other job end.
+     */
+    public void cancelJobs(UUID craftingRequestId) {
+        pendingCancellations.add(craftingRequestId);
+    }
+
+    private void processCancellations() {
+        if (pendingCancellations.isEmpty()) {
+            return;
+        }
+        for (var craftingId : pendingCancellations) {
+            for (var job : List.copyOf(jobs)) {
+                if (!(job instanceof ProcessingJob processing)
+                        || !craftingId.equals(processing.craftingRequestId())
+                        || !jobs.contains(job)) {
+                    continue;
+                }
+                AppliedFactory.LOGGER.info(
+                        "Factory workflow {} cancelled: its AE crafting request was cancelled",
+                        job.id());
+                finishJob(job, null);
+            }
+        }
+        pendingCancellations.clear();
+    }
+
+    /**
+     * Verifies restored processing jobs once: their crafting request may have been cancelled
+     * while the chunk was unloaded, so the cancellation callback was missed. Compares the grid's
+     * currently-crafted amounts for the job outputs to the zero they would be if the request is
+     * gone. This is a one-shot check, not a per-tick poll.
+     */
+    private void checkRestoredOrphans() {
+        if (!orphanCheckPending) {
+            return;
+        }
+        var allGridsReady = true;
+        for (var job : List.copyOf(jobs)) {
+            if (!(job instanceof ProcessingJob processing) || !jobs.contains(job)) {
+                continue;
+            }
+            var orderSide = processing.orderSide();
+            if (!host.onlineNetworks().contains(orderSide)) {
+                allGridsReady = false;
+                continue;
+            }
+            var awaiting = processing.outputKeys().stream()
+                    .mapToLong(key -> host.requestedCraftingAmount(orderSide, key))
+                    .sum();
+            if (awaiting == 0) {
+                AppliedFactory.LOGGER.info(
+                        "Factory workflow {} cancelled: its AE crafting request is gone", job.id());
+                finishJob(job, null);
+            }
+        }
+        if (allGridsReady) {
+            orphanCheckPending = false;
+        }
     }
 
     /** Starts a processing job for an offered pattern; false when the job was not accepted. */
@@ -191,7 +291,8 @@ public final class FactoryProgram {
                 inputs,
                 ScriptContinuation.empty(),
                 null,
-                0);
+                0,
+                CraftingRequestContext.current());
         var step = job.start(runtime);
         if (step instanceof ScriptStep.Failed failed) {
             host.reportScriptFailure("processing start", failed.message());
@@ -233,6 +334,7 @@ public final class FactoryProgram {
         reportedRecoveryFailures.clear();
         initialized = false;
         attempted = false;
+        reinitializing = false;
         environmentDirty = true;
         return entries;
     }
@@ -294,6 +396,7 @@ public final class FactoryProgram {
             RecoveryEntry.load(savedRecovery.getCompound(index), registries)
                     .ifPresent(recovery::add);
         }
+        orphanCheckPending = jobs.stream().anyMatch(job -> job instanceof ProcessingJob);
     }
 
     // ---- Internals -----------------------------------------------------------
@@ -302,47 +405,59 @@ public final class FactoryProgram {
         return (int) jobs.stream().filter(job -> job instanceof ProcessingJob).count();
     }
 
-    /** Whether initialization is complete for the current topology. */
+    /** Whether initialization is complete for the current environment. */
     private boolean ensureInitialized() {
-        return initialized
-                && !environmentDirty
-                && lastTopology == topologyFingerprint();
+        return initialized && !environmentDirty && !reinitializing;
     }
 
     /**
-     * Creates or advances the initializer until initialization completes or fails. While the
-     * initializer is suspended, a topology change keeps advancing the same job (its live
-     * getters read the new topology) rather than restarting it; a finished or failed attempt
-     * for the current topology is not retried until the topology changes again.
+     * Creates or advances the initializer until initialization completes or fails. The initial
+     * run happens regardless of events; afterwards it only re-runs when an event marks the
+     * environment dirty AND the topology signature actually changed, so spurious events that do
+     * not alter the watched topology (machine interactions, channel recalculation) are ignored.
+     * While the initializer is suspended, a change keeps advancing the same job (its live getters
+     * read the new environment) rather than restarting it; a finished or failed attempt is not
+     * retried until another event changes the topology again.
      */
     private void stepInitializer() {
-        var fingerprint = topologyFingerprint();
-        if (!environmentDirty && initialized && lastTopology == fingerprint) {
+        if (!environmentDirty && initialized && initializerJob == null) {
             return;
         }
-        if (attempted && !environmentDirty && lastAttemptedTopology == fingerprint
-                && initializerJob == null) {
-            // A previous attempt failed for this topology; wait for the topology to change.
+        if (!environmentDirty && initializerJob == null && attempted) {
+            // A previous attempt finished; wait for a change event before retrying.
             return;
         }
-        attempted = true;
-        lastAttemptedTopology = fingerprint;
-        environmentDirty = false;
-        if (initializerJob == null) {
-            initializerJob = new InitializerJob(UUID.randomUUID(), host,
-                    program.initializerNetworks());
-            var step = initializerJob.start(runtime);
-            if (step instanceof ScriptStep.Suspended suspended) {
-                initializerJob.setSuspended(
-                        suspended.continuation(), suspended.action(), host.tick());
-                host.markChanged();
-            } else {
-                finishJob(initializerJob,
-                        step instanceof ScriptStep.Failed failed ? failed.message() : null);
+        if (initializerJob != null) {
+            // A suspended initializer keeps advancing; record the current topology so the next
+            // change event can be compared against it. Its live getters read the new topology.
+            if (environmentDirty) {
+                lastSignature = topologySignature();
+                environmentDirty = false;
             }
+            advance(initializerJob, host.tick());
             return;
         }
-        advance(initializerJob, host.tick());
+        var signature = topologySignature();
+        if (initialized && signature == lastSignature) {
+            // An event fired but the watched topology is unchanged — nothing to re-initialize.
+            environmentDirty = false;
+            return;
+        }
+        reinitializing = initialized;
+        attempted = true;
+        lastSignature = signature;
+        environmentDirty = false;
+        initializerJob = new InitializerJob(UUID.randomUUID(), host,
+                program.initializerNetworks());
+        var step = initializerJob.start(runtime);
+        if (step instanceof ScriptStep.Suspended suspended) {
+            initializerJob.setSuspended(
+                    suspended.continuation(), suspended.action(), host.tick());
+            host.markChanged();
+        } else {
+            finishJob(initializerJob,
+                    step instanceof ScriptStep.Failed failed ? failed.message() : null);
+        }
     }
 
     private void startMissingPassives() {
@@ -419,9 +534,9 @@ public final class FactoryProgram {
     private void finishJob(FactoryJob job, @Nullable String failureMessage) {
         if (job == initializerJob) {
             initializerJob = null;
+            reinitializing = false;
             if (failureMessage == null) {
                 initialized = true;
-                lastTopology = lastAttemptedTopology;
             } else {
                 initialized = false;
                 host.reportScriptFailure("initializer", failureMessage);
@@ -499,7 +614,13 @@ public final class FactoryProgram {
         return online.isEmpty() ? null : online.iterator().next();
     }
 
-    private long topologyFingerprint() {
+    /**
+     * A cheap hash of exactly the watched topology: each initializer network's online state and
+     * bus set, plus each bus target's machine identity. Computed only when a change event marks
+     * the environment dirty (never per tick) and compared against {@link #lastSignature} to skip
+     * spurious initializer re-runs.
+     */
+    private long topologySignature() {
         long result = 1;
         var buses = host.busesByNetwork();
         var online = host.onlineNetworks();

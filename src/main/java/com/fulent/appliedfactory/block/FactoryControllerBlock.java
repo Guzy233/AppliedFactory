@@ -73,11 +73,11 @@ public final class FactoryControllerBlock extends BaseEntityBlock {
                 ((IPlayerExtension) serverPlayer).openMenu(new net.minecraft.world.SimpleMenuProvider(
                         (containerId, inventory, ignored) -> new FactoryControllerProgramMenu(
                                 containerId, inventory, factory),
-                        Component.translatable("gui.mefactorymanager.program")), pos);
+                        Component.translatable("gui.appliedfactory.program")), pos);
             } else {
                 ((IPlayerExtension) serverPlayer).openMenu(new net.minecraft.world.SimpleMenuProvider(
                         (containerId, inventory, ignored) -> new FactoryControllerMenu(containerId, inventory, factory),
-                        Component.translatable("gui.mefactorymanager.storage")), pos);
+                        Component.translatable("gui.appliedfactory.storage")), pos);
             }
         }
         return InteractionResult.sidedSuccess(level.isClientSide);

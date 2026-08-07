@@ -124,8 +124,11 @@ configurations {
 }
 
 dependencies {
-    // Compile against AE2's stable addon API, and load the full mod in dev runs.
+    // Compile against AE2's stable addon API for the game-facing code; the full jar is also on
+    // the compile classpath so the event-driven mixins can target AE2 internals (Grid,
+    // CraftingCpuLogic). Load the full mod in dev runs.
     compileOnly "org.appliedenergistics:appliedenergistics2:${ae2_version}:api"
+    compileOnly "org.appliedenergistics:appliedenergistics2:${ae2_version}"
     localRuntime "org.appliedenergistics:appliedenergistics2:${ae2_version}"
 
     // Rhino is a plain Java library rather than a NeoForge mod. Bundle it for

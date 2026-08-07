@@ -54,19 +54,19 @@ public final class FactoryControllerProgramScreen
                 editorY,
                 editorWidth,
                 editorHeight,
-                Component.translatable("gui.mefactorymanager.script"),
+                Component.translatable("gui.appliedfactory.script"),
                 Component.literal(ControllerProgram.DEFAULT_SOURCE));
         scriptBox.setCharacterLimit(ControllerProgram.MAX_SOURCE_LENGTH);
         scriptBox.setValue(currentSource);
         addRenderableWidget(scriptBox);
 
         addRenderableWidget(Button.builder(
-                Component.translatable("gui.mefactorymanager.save"), ignored -> saveProgram())
+                Component.translatable("gui.appliedfactory.save"), ignored -> saveProgram())
                 .bounds(leftPos + imageWidth - 62, topPos + 5, 56, 18)
                 .build());
 
         errorSubscription = addRenderableWidget(Checkbox.builder(
-                        Component.translatable("gui.mefactorymanager.subscribe_errors"), font)
+                        Component.translatable("gui.appliedfactory.subscribe_errors"), font)
                 .pos(leftPos + MARGIN, topPos + 28)
                 .selected(menu.isErrorSubscribed(viewerId))
                 .onValueChange((checkbox, selected) -> setErrorSubscription(selected))
@@ -75,7 +75,7 @@ public final class FactoryControllerProgramScreen
     }
 
     private void saveProgram() {
-        saveStatus = Component.translatable("gui.mefactorymanager.saving");
+        saveStatus = Component.translatable("gui.appliedfactory.saving");
         saveStatusColor = 0xffffd37a;
         PacketDistributor.sendToServer(new SaveControllerProgramPayload(
                 menu.getBlockPos(), scriptBox.getValue()));
@@ -92,11 +92,11 @@ public final class FactoryControllerProgramScreen
             return;
         }
         if (payload.saved()) {
-            saveStatus = Component.translatable("gui.mefactorymanager.save_success");
+            saveStatus = Component.translatable("gui.appliedfactory.save_success");
             saveStatusColor = 0xff8fe3af;
         } else {
             saveStatus = Component.translatable(
-                    "gui.mefactorymanager.syntax_error", payload.message());
+                    "gui.appliedfactory.syntax_error", payload.message());
             saveStatusColor = 0xffff7d7d;
         }
     }

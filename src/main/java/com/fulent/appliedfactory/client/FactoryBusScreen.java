@@ -52,13 +52,13 @@ public final class FactoryBusScreen extends AbstractContainerScreen<FactoryBusMe
                 ? 0
                 : part.machine().map(machine -> machine.redstoneLevel()).orElse(0);
         graphics.drawString(font,
-                Component.translatable("gui.mefactorymanager.factory_bus.target", target),
+                Component.translatable("gui.appliedfactory.factory_bus.target", target),
                 8, 19, 0xffe0e0e0, false);
         graphics.drawString(font,
-                Component.translatable("gui.mefactorymanager.factory_bus.redstone", redstone),
+                Component.translatable("gui.appliedfactory.factory_bus.redstone", redstone),
                 8, 29, 0xffe0e0e0, false);
         graphics.drawString(font,
-                Component.translatable("gui.mefactorymanager.factory_bus.acceleration"),
+                Component.translatable("gui.appliedfactory.factory_bus.acceleration"),
                 8, 43, 0xffe0e0e0, false);
     }
 

@@ -72,8 +72,8 @@ public final class FactoryControllerScreen extends AbstractContainerScreen<Facto
     @Override
     protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
         graphics.drawString(font, title, 8, 9, 0xffd7f4ff);
-        graphics.drawString(font, Component.translatable("gui.mefactorymanager.patterns"), 8, 26, 0xffa9d8e9);
-        graphics.drawString(font, Component.translatable("gui.mefactorymanager.cache"), 8, 64, 0xffa9d8e9);
-        graphics.drawString(font, Component.translatable("gui.mefactorymanager.inventory"), 8, 102, 0xffa9d8e9);
+        graphics.drawString(font, Component.translatable("gui.appliedfactory.patterns"), 8, 26, 0xffa9d8e9);
+        graphics.drawString(font, Component.translatable("gui.appliedfactory.cache"), 8, 64, 0xffa9d8e9);
+        graphics.drawString(font, Component.translatable("gui.appliedfactory.inventory"), 8, 102, 0xffa9d8e9);
     }
 }
