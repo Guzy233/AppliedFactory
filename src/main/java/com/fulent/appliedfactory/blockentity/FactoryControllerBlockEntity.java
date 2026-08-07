@@ -464,6 +464,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public Optional<FactoryActionExecutor.NetworkEndpoint> networkStorage(Direction side) {
+        return getNetworkStorage(side);
+    }
+
+    @Override
     public void markChanged() {
         setChanged();
     }

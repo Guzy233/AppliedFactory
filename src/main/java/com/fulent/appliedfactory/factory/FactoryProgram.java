@@ -5,6 +5,7 @@ import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -62,6 +63,13 @@ public final class FactoryProgram {
         boolean returnOwned(List<FactoryResource> owned, Direction side);
 
         FactoryActionResult performAction(FactoryJob job, FactoryScriptAction action);
+
+        /**
+         * Resolves the ME storage endpoint attached to one controller side, or
+         * empty when that side is offline or not connected. Used by synchronous
+         * script reads such as {@code network.items().count(...)}.
+         */
+        Optional<FactoryActionExecutor.NetworkEndpoint> networkStorage(Direction side);
 
         void reportScriptFailure(String stage, String message);
 

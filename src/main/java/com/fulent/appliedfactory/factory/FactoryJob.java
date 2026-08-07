@@ -104,6 +104,10 @@ public abstract class FactoryJob {
         return id;
     }
 
+    public HolderLookup.Provider registries() {
+        return host.registries();
+    }
+
     public List<FactoryResource> owned() {
         return owned;
     }
@@ -227,7 +231,8 @@ public abstract class FactoryJob {
                 host.busesByNetwork(),
                 accessibleNetworks,
                 host.onlineNetworks(),
-                host.registries());
+                host.registries(),
+                host::networkStorage);
     }
 
     static List<FactoryResource> normalize(List<FactoryResource> resources) {

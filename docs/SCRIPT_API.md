@@ -338,6 +338,7 @@ Bus 句柄内部只保留地址。`exists`、`state`、`target` 和 `items` 每�
 - `use()` 由名为 `[Applied Factory]` 的空手伪玩家点击目标方块；会经过正常的服务端交互与保护兼容路径。
 - `place(resource)` 由同一伪玩家把一个 owned block item 放进空的目标位置。无论资源对象的 `amount` 多大，每次成功调用只消耗一个；目标非空气、资源不是方块物品或放置被拒绝时返回 `false`。
 - `break()` 由同一伪玩家使用内置、无附魔的钻石镐破坏当前目标方块，并把普通方块掉落捕获为 owned resources。缓存不能完整接收预估掉落时不破坏方块；若 modded loot 与预估不一致导致实际掉落无法写入缓存，掉落物会保留为世界物品实体而不是被删除。返回空数组表示目标未破坏或没有可捕获掉落。
+- `break(tool)` 用 `tool`（一个 owned 物品）作为伪玩家手持工具破坏目标方块，掉落计算遵循该工具的采掘等级、附魔和标签；工具只校验所有权、不消耗、不扣耐久。其余语义与 `break()` 一致。
 - `redstone(level)` 将这个 Factory Bus 所在物理面输出设置为 `0` 到 `15`，该值会保存并通知邻居；返回 `false` 仅表示总线已不再可访问。`bus.state().redstone` 仍是目标方块面对总线的输入信号，不是这个输出值。
 
 例如，先识别目标、再让总线作为红石执行器：
@@ -363,12 +364,16 @@ interface BlockView {
   readonly id: string;
   readonly state: Readonly<Record<string, string>>;
   readonly blockEntityType: string | null;
+  // 方块实体自身的 NBT 快照（不含 id/坐标元数据）；无方块实体时为 null。
+  readonly nbt: Readonly<Record<string, NbtValue>> | null;
 
   matches(selector: string): boolean;
 }
 ```
 
-脚本只能读取 MFM 明确转换后的不可变数据，不能取得原始方块实体、capability、NBT 或 Java 反射对象。
+`BlockView.nbt` 是 `bus.target()` 调用时刻的不可变快照，使用与 `Resource.nbt()` 相同的有界 NBT 转换。普通 BlockState 属性变化不属于拓扑变化，脚本应在 handler 中重新调用 `bus.target()`。
+
+脚本只能读取 AF 明确转换后的不可变数据，不能取得原始方块实体、capability 或 Java 反射对象。
 
 ## 8. 多面方块由脚本组合
 
@@ -415,22 +420,35 @@ Bus 损坏或移动后旧句柄不会自动换地址。需要重选时，脚本�
 ```js
 item("minecraft:iron_ore", 1)
 item("minecraft:iron_ingot", 1)
+// 可选第三参：精确数据组件（Data Components），见下。
+item("minecraft:iron_pickaxe", 1, { "minecraft:enchantments": { levels: { "minecraft:efficiency": 5 } } })
 ```
 
-`item` 在样板注册和 Network 精确提取时创建不可变资源请求。
+`item` 在样板注册和 Network 精确提取时创建不可变资源请求。不带 `nbt` 时请求的是默认组件；带 `nbt` 时请求的是携带该组件补丁的精确 AE key。
 
 ```ts
+type NbtValue = string | number | boolean | readonly NbtValue[]
+    | Readonly<Record<string, NbtValue>> | null;
+
 interface Resource {
   readonly id: string;
   readonly amount: number;
 
   matches(selector: string): boolean;
+  // 该物品完整存档 NBT 的只读快照：{ id, count, components }。
+  nbt(): Readonly<Record<string, NbtValue>>;
 }
 
 interface OwnedResource extends Resource {
   // 不可由脚本构造的当前 workflow 所有权
+  // 给这个 owned 物品设置自定义显示名，挂起执行，返回改名后的 OwnedResource。
+  rename(name: string): OwnedResource;
 }
 ```
+
+`Resource.nbt()` 是有界的只读转换，不能取得原始 `ItemStack`、NBT 对象或组件句柄。整数超过 `2^53` 的长整型以字符串返回，避免精度丢失。超过深度/节点上限的 NBT 会抛出脚本错误。
+
+`OwnedResource.rename(name)` 把该 owned 物品改名为 `name`：普通字符串按纯文本处理，合法 JSON 文本按序列化 Component 解析（例如 `{"text":"绿","color":"green"}`），从而支持颜色和样式。改名是缓存和所有权账本上的键迁移：旧键移除、新键存入，之后返回的句柄携带新键，可用 `push` 推送；旧句柄随余额校验失效。非物品资源（如流体）不支持改名，返回空数组。
 
 - `ctx.inputs` 是 AE 实际交付且由 workflow 拥有的精确资源；
 - `ctx.outputs` 是样板声明的期望值，不表示 workflow 已经拥有产物；
@@ -514,6 +532,8 @@ Bus 与 AE 网络不强行实现同一个存储接口。二者都支持精确 `p
 interface NetworkItems {
   push(resources: OwnedResource | readonly OwnedResource[]): boolean;
   extract(requests: Resource | readonly Resource[]): readonly OwnedResource[];
+  read(): readonly Resource[];
+  count(spec: string | Resource): number;
 }
 ```
 
@@ -542,6 +562,22 @@ if (!source.online()) return;
 
 const ores = source.items().extract(item("minecraft:iron_ore", 1));
 if (ores.length === 0) return;
+```
+
+### 11.3 `network.items().read()` 与 `network.items().count(spec)`
+
+两个同步只读操作，不改变网络、不转移资源，也不触发挂起。它们读取当前 tick 该 AE 网格可提供的物品：
+
+- `read()` 返回当前可提供物品的独立快照数组，元素是观察值（不能传给 `push`）；
+- `count(spec)` 返回匹配数量；`spec` 为字符串时按物品 id 或 `#tag` 宽松匹配（不区分数据组件），为 `item(...)` 资源对象时精确匹配其 AE key（`item(id, amount, nbt)` 可用于按组件统计）。
+
+网络离线或未接线时 `read()` 返回空数组、`count(spec)` 返回 `0`。`read()` 与 `count()` 是同步只读操作，processing/passive workflow 与 initializer（仅限其声明监听的网络）都可以调用。
+
+```js
+const north = ctx.network("north");
+if (north.online() && north.items().count("minecraft:iron_ingot") < 64) {
+  // 铸造更多铁锭。
+}
 ```
 
 ## 12. 脚本样板
@@ -787,18 +823,19 @@ registerControllerHandler({
 
 这个成本由样板执行次数决定，不由脚本声明或查询。被动 workflow 不属于 AE crafting job，因此不占 crafting CPU。若实践证明原版的固定成本不足，再单独增加服务端配置和 AE 集成点；它不进入首版脚本 API。
 
-## 18. 第一阶段暂不设计
+## 18. 暂不设计
 
 - `InsertResult`、`ExtractResult` 或失败原因枚举；
 - 部分插入、部分请求、`moved` / `remaining` 资源切片；
-- selector/tag 网络提取；
-- `Resource.slice`、`Resource.split` 和脚本构造 component patch；
+- selector/tag 网络提取（`extract` 仍要求精确数量；`count` 支持 tag 字符串）；
+- `Resource.slice`、`Resource.split`；
 - Java 侧 Machine、机器池、租约或批次归属；
 - `getMachine(s)`、原生 Bus filter callback 或查询 DSL；
 - 自动等待、自动换 Bus、自动换网络或参数重新求值；
 - 独立并发的 `setTimeout(callback)` 定时任务；
 - Bus UUID、移动后保持身份或预期 block ID 校验；
-- 流体端点、假玩家交互、投掷和任意世界操作；
+- 流体端点、任意世界操作；
+- `break(tool)` 的耐久扣减（工具当前只借用不消耗）；
 - 默认机器并发锁；
 - 根据 Rhino 实际内存动态计算 crafting CPU bytes。
 

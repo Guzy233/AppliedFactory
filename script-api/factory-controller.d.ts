@@ -7,15 +7,24 @@
 
 type Direction = "up" | "down" | "north" | "south" | "west" | "east";
 
+type NbtValue = string | number | boolean
+    | readonly NbtValue[]
+    | Readonly<Record<string, NbtValue>>
+    | null;
+
 interface Resource {
     readonly id: string;
     readonly amount: number;
 
     matches(selector: string): boolean;
+    /** Read-only snapshot of this item's full saved NBT ({@code {id, count, components}}). */
+    nbt(): Readonly<Record<string, NbtValue>>;
 }
 
 /** A resource currently owned by this workflow and therefore valid for `push`. */
 interface OwnedResource extends Resource {
+    /** Renames this owned item and returns the renamed owned resource; suspends. */
+    rename(name: string): OwnedResource;
 }
 
 interface FactoryBusAddress {
@@ -39,6 +48,8 @@ interface BlockView {
     readonly id: string;
     readonly state: Readonly<Record<string, string>>;
     readonly blockEntityType: string | null;
+    /** Read-only snapshot of the block entity's own NBT, or null when there is none. */
+    readonly nbt: Readonly<Record<string, NbtValue>> | null;
 
     matches(selector: string): boolean;
 }
@@ -74,8 +85,13 @@ interface Bus {
     use(): boolean;
     /** Places one owned block item at an empty target position. */
     place(resource: OwnedResource): boolean;
-    /** Breaks the target and returns its normal drops as owned resources. */
+    /** Breaks the target with the built-in mining tool and returns its normal drops. */
     "break"(): readonly OwnedResource[];
+    /**
+     * Breaks the target using one owned item as the held tool, and returns its
+     * normal drops. The tool is only validated for ownership, never consumed.
+     */
+    "break"(tool: OwnedResource): readonly OwnedResource[];
     /** Sets this bus's physical redstone output to an exact strength from 0 through 15. */
     redstone(level: number): boolean;
 }
@@ -83,6 +99,13 @@ interface Bus {
 interface NetworkItems {
     push(resources: OwnedResource | readonly OwnedResource[]): boolean;
     extract(requests: Resource | readonly Resource[]): readonly OwnedResource[];
+    /** Snapshot of everything this network can currently supply; read-only resources. */
+    read(): readonly Resource[];
+    /**
+     * Counts items matching a string selector (item id or {@code #tag}, any data
+     * components) or an exact {@code item(id, amount[, nbt])} resource key.
+     */
+    count(spec: string | Resource): number;
 }
 
 interface Network {
@@ -145,7 +168,7 @@ interface ControllerHandlerDefinition {
     readonly handler: (ctx: ProcessingContext) => void;
 }
 
-declare function item(id: string, amount: number): Resource;
+declare function item(id: string, amount: number, nbt?: object): Resource;
 declare function initialize(definition: InitializerDefinition): void;
 declare function registerPatterns(definition: PatternRegistration): void;
 declare function registerControllerHandler(definition: ControllerHandlerDefinition): void;

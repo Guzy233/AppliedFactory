@@ -12,6 +12,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.TagKey;
@@ -162,22 +163,52 @@ public final class FactoryMachineAccess {
         }
     }
 
-    /** Calculates normal player drops without changing the target block. */
+    /**
+     * Returns the target block entity's own NBT data without metadata, or null
+     * when the target has no block entity. Read-only: the returned tag is a
+     * detached copy.
+     */
+    @Nullable
+    public CompoundTag blockEntityNbt() {
+        if (level.isClientSide || !isLoaded()) {
+            return null;
+        }
+        var blockEntity = level.getBlockEntity(position);
+        if (blockEntity == null) {
+            return null;
+        }
+        return blockEntity.saveWithoutMetadata(level.registryAccess());
+    }
+
+    /** Calculates normal player drops using the built-in mining tool. */
     public List<ItemStack> previewBreakDrops() {
+        return previewBreakDrops(null);
+    }
+
+    /** Calculates normal player drops using the given tool, or the built-in one. */
+    public List<ItemStack> previewBreakDrops(@Nullable ItemStack tool) {
         var player = interactionPlayer();
         if (player == null || !isLoaded() || blockState().isAir()) {
             return List.of();
         }
-        return dropsFor(blockState(), player, miningTool());
+        return dropsFor(blockState(), player, tool == null ? miningTool() : tool);
     }
 
     /**
-     * Breaks the target after the standard NeoForge break event, returning its
-     * player drops instead
-     * of spawning them into the world. The caller is responsible for storing those
-     * drops.
+     * Breaks the target with the built-in mining tool after the standard NeoForge
+     * break event, returning its player drops instead of spawning them into the
+     * world. The caller is responsible for storing those drops.
      */
     public BreakResult breakAndCollect() {
+        return breakAndCollect(null);
+    }
+
+    /**
+     * Breaks the target with the given tool after the standard NeoForge break
+     * event, returning its player drops instead of spawning them into the world.
+     * The caller is responsible for storing those drops.
+     */
+    public BreakResult breakAndCollect(@Nullable ItemStack tool) {
         if (!(level instanceof ServerLevel serverLevel) || !isLoaded() || blockState().isAir()) {
             return BreakResult.failed();
         }
@@ -186,15 +217,15 @@ public final class FactoryMachineAccess {
             return BreakResult.failed();
         }
         var previousTool = player.getItemInHand(InteractionHand.MAIN_HAND);
-        var tool = miningTool();
-        player.setItemInHand(InteractionHand.MAIN_HAND, tool);
+        var usedTool = tool == null ? miningTool() : tool;
+        player.setItemInHand(InteractionHand.MAIN_HAND, usedTool);
         try {
             var state = blockState();
             if (CommonHooks.fireBlockBreak(serverLevel, GameType.SURVIVAL, player, position, state)
                     .isCanceled()) {
                 return BreakResult.failed();
             }
-            var drops = dropsFor(state, player, tool);
+            var drops = dropsFor(state, player, usedTool);
             if (!serverLevel.destroyBlock(position, false, player)) {
                 return BreakResult.failed();
             }

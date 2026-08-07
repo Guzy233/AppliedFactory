@@ -25,13 +25,15 @@ public record FactoryScriptAction(
         @Nullable Direction networkSide,
         List<FactoryResource> resources,
         int sleepTicks,
-        int redstoneLevel) {
+        int redstoneLevel,
+        @Nullable String name) {
     private static final String TYPE_TAG = "Type";
     private static final String BUS_TAG = "Bus";
     private static final String NETWORK_TAG = "Network";
     private static final String RESOURCES_TAG = "Resources";
     private static final String SLEEP_TAG = "Sleep";
     private static final String REDSTONE_TAG = "Redstone";
+    private static final String NAME_TAG = "Name";
 
     public FactoryScriptAction {
         Objects.requireNonNull(type, "type");
@@ -65,54 +67,77 @@ public record FactoryScriptAction(
         } else if (redstoneLevel != 0) {
             throw new IllegalArgumentException(type + " cannot have a redstone level");
         }
+        if (type == Type.RENAME_OWNED) {
+            if (name == null) {
+                throw new IllegalArgumentException("RENAME_OWNED requires a name");
+            }
+        } else if (name != null) {
+            throw new IllegalArgumentException(type + " cannot carry a name");
+        }
         if (type == Type.BUS_PLACE && (resources.size() != 1 || resources.get(0).amount() != 1)) {
             throw new IllegalArgumentException("BUS_PLACE requires exactly one item resource");
+        }
+        if (type == Type.BUS_BREAK_WITH
+                && (resources.size() != 1 || resources.get(0).amount() != 1)) {
+            throw new IllegalArgumentException(
+                    "BUS_BREAK_WITH requires exactly one owned item unit");
         }
     }
 
     public static FactoryScriptAction busPush(
             FactoryBusAddress bus, List<FactoryResource> resources) {
-        return new FactoryScriptAction(Type.BUS_PUSH, bus, null, resources, 0, 0);
+        return new FactoryScriptAction(Type.BUS_PUSH, bus, null, resources, 0, 0, null);
     }
 
     public static FactoryScriptAction busExtract(FactoryBusAddress bus) {
-        return new FactoryScriptAction(Type.BUS_EXTRACT, bus, null, List.of(), 0, 0);
+        return new FactoryScriptAction(Type.BUS_EXTRACT, bus, null, List.of(), 0, 0, null);
     }
 
     public static FactoryScriptAction busDrop(
             FactoryBusAddress bus, List<FactoryResource> resources) {
-        return new FactoryScriptAction(Type.BUS_DROP, bus, null, resources, 0, 0);
+        return new FactoryScriptAction(Type.BUS_DROP, bus, null, resources, 0, 0, null);
     }
 
     public static FactoryScriptAction busUse(FactoryBusAddress bus) {
-        return new FactoryScriptAction(Type.BUS_USE, bus, null, List.of(), 0, 0);
+        return new FactoryScriptAction(Type.BUS_USE, bus, null, List.of(), 0, 0, null);
     }
 
     public static FactoryScriptAction busPlace(
             FactoryBusAddress bus, FactoryResource resource) {
-        return new FactoryScriptAction(Type.BUS_PLACE, bus, null, List.of(resource), 0, 0);
+        return new FactoryScriptAction(Type.BUS_PLACE, bus, null, List.of(resource), 0, 0, null);
     }
 
     public static FactoryScriptAction busBreak(FactoryBusAddress bus) {
-        return new FactoryScriptAction(Type.BUS_BREAK, bus, null, List.of(), 0, 0);
+        return new FactoryScriptAction(Type.BUS_BREAK, bus, null, List.of(), 0, 0, null);
+    }
+
+    public static FactoryScriptAction busBreakWith(
+            FactoryBusAddress bus, FactoryResource tool) {
+        return new FactoryScriptAction(
+                Type.BUS_BREAK_WITH, bus, null, List.of(tool), 0, 0, null);
     }
 
     public static FactoryScriptAction busRedstone(FactoryBusAddress bus, int level) {
-        return new FactoryScriptAction(Type.BUS_REDSTONE, bus, null, List.of(), 0, level);
+        return new FactoryScriptAction(Type.BUS_REDSTONE, bus, null, List.of(), 0, level, null);
     }
 
     public static FactoryScriptAction networkPush(
             Direction side, List<FactoryResource> resources) {
-        return new FactoryScriptAction(Type.NETWORK_PUSH, null, side, resources, 0, 0);
+        return new FactoryScriptAction(Type.NETWORK_PUSH, null, side, resources, 0, 0, null);
     }
 
     public static FactoryScriptAction networkExtract(
             Direction side, List<FactoryResource> resources) {
-        return new FactoryScriptAction(Type.NETWORK_EXTRACT, null, side, resources, 0, 0);
+        return new FactoryScriptAction(Type.NETWORK_EXTRACT, null, side, resources, 0, 0, null);
+    }
+
+    public static FactoryScriptAction renameOwned(
+            List<FactoryResource> resources, String name) {
+        return new FactoryScriptAction(Type.RENAME_OWNED, null, null, resources, 0, 0, name);
     }
 
     public static FactoryScriptAction sleep(int ticks) {
-        return new FactoryScriptAction(Type.SLEEP, null, null, List.of(), ticks, 0);
+        return new FactoryScriptAction(Type.SLEEP, null, null, List.of(), ticks, 0, null);
     }
 
     public CompoundTag save(HolderLookup.Provider registries) {
@@ -131,6 +156,9 @@ public record FactoryScriptAction(
         tag.put(RESOURCES_TAG, savedResources);
         tag.putInt(SLEEP_TAG, sleepTicks);
         tag.putByte(REDSTONE_TAG, (byte) redstoneLevel);
+        if (name != null) {
+            tag.putString(NAME_TAG, name);
+        }
         return tag;
     }
 
@@ -182,7 +210,8 @@ public record FactoryScriptAction(
         try {
             return Optional.of(new FactoryScriptAction(
                     type, bus, networkSide, resources, tag.getInt(SLEEP_TAG),
-                    tag.contains(REDSTONE_TAG, Tag.TAG_BYTE) ? tag.getByte(REDSTONE_TAG) : 0));
+                    tag.contains(REDSTONE_TAG, Tag.TAG_BYTE) ? tag.getByte(REDSTONE_TAG) : 0,
+                    tag.contains(NAME_TAG, Tag.TAG_STRING) ? tag.getString(NAME_TAG) : null));
         } catch (IllegalArgumentException | ArithmeticException exception) {
             return Optional.empty();
         }
@@ -215,9 +244,11 @@ public record FactoryScriptAction(
         BUS_USE(true, false, false),
         BUS_PLACE(true, false, true),
         BUS_BREAK(true, false, false),
+        BUS_BREAK_WITH(true, false, true),
         BUS_REDSTONE(true, false, false),
         NETWORK_PUSH(false, true, true),
         NETWORK_EXTRACT(false, true, true),
+        RENAME_OWNED(false, false, true),
         SLEEP(false, false, false);
 
         private final boolean busAction;

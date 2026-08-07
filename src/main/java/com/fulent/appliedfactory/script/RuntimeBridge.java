@@ -19,6 +19,7 @@ import org.mozilla.javascript.ScriptableObject;
 import org.mozilla.javascript.Undefined;
 
 import com.fulent.appliedfactory.AppliedFactory;
+import com.fulent.appliedfactory.factory.FactoryActionExecutor;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.part.FactoryBusPart;
@@ -29,10 +30,14 @@ import appeng.api.crafting.PatternDetailsHelper;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
 import appeng.api.stacks.GenericStack;
+import appeng.api.stacks.KeyCounter;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponentPatch;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.TagKey;
@@ -66,6 +71,7 @@ final class RuntimeBridge {
     static final String RESOURCE_KEY_PROPERTY = "__factoryKey";
     static final String RESOURCE_ITEM_PROPERTY = "__factoryItem";
     static final String RESOURCE_OWNER_PROPERTY = "__factoryOwner";
+    static final String RESOURCE_NBT_PROPERTY = "__factoryNbt";
     static final String INITIALIZE_NAME = "initialize";
     static final String REGISTER_PATTERNS_NAME = "registerPatterns";
     static final String REGISTER_CONTROLLER_NAME = "registerControllerHandler";
@@ -259,12 +265,18 @@ final class RuntimeBridge {
 
     private BaseFunction itemFunction() {
         return function((cx, args) -> {
-            requireArity(args, 2, 2, "item(id, amount)");
+            requireArity(args, 2, 3, "item(id, amount[, nbt])");
             var id = ResourceLocation.tryParse(Context.toString(args[0]));
             if (id == null || !BuiltInRegistries.ITEM.containsKey(id)) {
                 throw scriptError("Unknown item id: " + Context.toString(args[0]));
             }
-            return itemResourceObject(cx, id, positiveLong(args[1], "item amount"));
+            var amount = positiveLong(args[1], "item amount");
+            CompoundTag nbt = null;
+            if (args.length == 3) {
+                nbt = NbtJs.fromObject(
+                        cx, requireObject(args[2], "item nbt"), "item nbt");
+            }
+            return itemResourceObject(cx, id, amount, nbt);
         });
     }
 
@@ -448,8 +460,12 @@ final class RuntimeBridge {
 
         @JsMethod(name = "break")
         public Object doBreak(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 0, 0, "bus.break()");
-            return suspend(cx, FactoryScriptAction.busBreak(requireBus(self)));
+            requireArity(args, 0, 1, "bus.break(tool?)");
+            if (args.length == 0) {
+                return suspend(cx, FactoryScriptAction.busBreak(requireBus(self)));
+            }
+            return suspend(cx, FactoryScriptAction.busBreakWith(
+                    requireBus(self), parseOwnedUnit(args[0])));
         }
 
         @JsMethod
@@ -523,6 +539,33 @@ final class RuntimeBridge {
                     requireNetwork(self),
                     parseResourceSpecs(args[0], "network requests")));
         }
+
+        @JsMethod
+        public Object read(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 0, 0, "network.items().read()");
+            var endpoint = context.networkStorage(requireNetwork(self)).orElse(null);
+            if (endpoint == null) {
+                return cx.newArray(scope, 0);
+            }
+            return resourceArray(cx, availableResources(endpoint), null);
+        }
+
+        @JsMethod
+        public Object count(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "network.items().count(spec)");
+            var endpoint = context.networkStorage(requireNetwork(self)).orElse(null);
+            if (endpoint == null) {
+                return 0.0;
+            }
+            var selector = args[0];
+            long total = 0;
+            for (var resource : availableResources(endpoint)) {
+                if (matchesResource(resource, selector)) {
+                    total = Math.addExact(total, resource.amount());
+                }
+            }
+            return (double) total;
+        }
     }
 
     /** Shared method for every resource object. */
@@ -542,6 +585,37 @@ final class RuntimeBridge {
             }
             var id = ResourceLocation.tryParse(selector);
             return id != null && id.equals(key.getId());
+        }
+
+        @JsMethod
+        public Object nbt(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 0, 0, "resource.nbt()");
+            if (self.getPrototype() != resourcePrototype) {
+                throw scriptError("Resource method received an invalid receiver");
+            }
+            var key = resourceKey(self);
+            if (!(key instanceof AEItemKey itemKey)) {
+                return cx.newObject(scope);
+            }
+            return itemNbtObject(cx, itemKey);
+        }
+
+        @JsMethod
+        public Object rename(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "resource.rename(name)");
+            if (self.getPrototype() != resourcePrototype) {
+                throw scriptError("Resource method received an invalid receiver");
+            }
+            var owner = ScriptableObject.getProperty(self, RESOURCE_OWNER_PROPERTY);
+            if (owner == Scriptable.NOT_FOUND
+                    || !context.workflowId().toString().equals(Context.toString(owner))) {
+                throw scriptError("rename only accepts a resource owned by this workflow");
+            }
+            var name = Context.toString(args[0]);
+            if (name.isBlank()) {
+                throw scriptError("rename requires a non-blank name");
+            }
+            return suspend(cx, FactoryScriptAction.renameOwned(parseOwned(self), name));
         }
     }
 
@@ -647,15 +721,62 @@ final class RuntimeBridge {
             defineReadOnly(state, property.getName(), propertyName(blockState, property));
         }
         var blockEntityType = machine.blockEntityTypeId();
+        var blockNbt = machine.blockEntityNbt();
+        var nbtObject = blockNbt == null ? null : NbtJs.toJs(cx, scope, blockNbt);
         return Jsify.toScriptable(cx, scope, blockPrototype, new BlockView(
                 machine.blockId().toString(),
                 state,
-                blockEntityType == null ? null : blockEntityType.toString()));
+                blockEntityType == null ? null : blockEntityType.toString(),
+                nbtObject instanceof Scriptable scriptable ? scriptable : null));
     }
 
-    private Scriptable itemResourceObject(Context cx, ResourceLocation id, long amount) {
+    private Scriptable itemResourceObject(
+            Context cx, ResourceLocation id, long amount, @Nullable CompoundTag nbt) {
         return Jsify.toScriptable(cx, scope, resourcePrototype,
-                new ItemResourceView(id.toString(), (double) amount));
+                new ItemResourceView(id.toString(), (double) amount,
+                        nbt == null ? null : nbt.toString()));
+    }
+
+    /** Snapshot of everything an attached AE network can currently supply. */
+    private List<FactoryResource> availableResources(
+            FactoryActionExecutor.NetworkEndpoint endpoint) {
+        var amounts = new KeyCounter();
+        endpoint.storage().getAvailableStacks(amounts);
+        var result = new ArrayList<FactoryResource>();
+        for (var entry : amounts) {
+            if (entry.getLongValue() > 0) {
+                result.add(new FactoryResource(entry.getKey(), entry.getLongValue()));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * A string selector matches an item id or {@code #tag} loosely (any data
+     * components); a resource object matches its exact AE key.
+     */
+    private boolean matchesResource(FactoryResource resource, Object selector) {
+        if (selector instanceof Scriptable scriptable) {
+            try {
+                return resource.key().equals(resourceKey(scriptable));
+            } catch (RuntimeException ignored) {
+                return false;
+            }
+        }
+        var text = Context.toString(selector);
+        if (text.startsWith("#")) {
+            var tagId = ResourceLocation.tryParse(text.substring(1));
+            return tagId != null && resource.key() instanceof AEItemKey itemKey
+                    && itemKey.isTagged(TagKey.create(Registries.ITEM, tagId));
+        }
+        var id = ResourceLocation.tryParse(text);
+        return id != null && id.equals(resource.key().getId());
+    }
+
+    /** The full saved item NBT of one exact item key, as a read-only JS tree. */
+    private Scriptable itemNbtObject(Context cx, AEItemKey itemKey) {
+        var tag = itemKey.toStack().save(context.registries());
+        return (Scriptable) NbtJs.toJs(cx, scope, tag);
     }
 
     private Scriptable resourceObject(
@@ -765,17 +886,20 @@ final class RuntimeBridge {
     private record BlockView(
             @JsReadOnly String id,
             @JsReadOnly Scriptable state,
-            @JsReadOnly String blockEntityType) {
+            @JsReadOnly String blockEntityType,
+            @JsReadOnly Scriptable nbt) {
     }
 
     /** Java template for the {@code item()} global result. */
     private static final class ItemResourceView {
         private final String id;
         private final double amount;
+        private final String nbt;
 
-        private ItemResourceView(String id, double amount) {
+        private ItemResourceView(String id, double amount, String nbt) {
             this.id = id;
             this.amount = amount;
+            this.nbt = nbt;
         }
 
         @JsReadOnly
@@ -796,6 +920,12 @@ final class RuntimeBridge {
         @JsInternal(name = RESOURCE_OWNER_PROPERTY)
         public String getOwner() {
             return "";
+        }
+
+        @JsInternal(name = RESOURCE_NBT_PROPERTY)
+        @JsOptional
+        public String getNbt() {
+            return nbt;
         }
     }
 
@@ -916,6 +1046,10 @@ final class RuntimeBridge {
             }
             throw scriptError("Resource contains an invalid exact AE key");
         }
+        var nbtValue = ScriptableObject.getProperty(resource, RESOURCE_NBT_PROPERTY);
+        if (nbtValue != Scriptable.NOT_FOUND) {
+            return nbtResourceKey(resource, Context.toString(nbtValue));
+        }
         var itemIdValue = ScriptableObject.getProperty(resource, RESOURCE_ITEM_PROPERTY);
         var itemId = itemIdValue == Scriptable.NOT_FOUND
                 ? null
@@ -924,6 +1058,28 @@ final class RuntimeBridge {
             throw scriptError("Resource contains an invalid item id");
         }
         return AEItemKey.of(BuiltInRegistries.ITEM.get(itemId));
+    }
+
+    /** Rebuilds an exact item key from the component patch carried by an {@code item()} spec. */
+    private AEKey nbtResourceKey(Scriptable resource, String nbtTag) {
+        final DataComponentPatch patch;
+        try {
+            patch = DataComponentPatch.CODEC.parse(
+                    NbtOps.INSTANCE, TagParser.parseTag(nbtTag))
+                    .resultOrPartial(error -> { }).orElse(null);
+        } catch (CommandSyntaxException exception) {
+            throw scriptError("Resource contains invalid item data components");
+        }
+        var itemIdValue = ScriptableObject.getProperty(resource, RESOURCE_ITEM_PROPERTY);
+        var itemId = itemIdValue == Scriptable.NOT_FOUND
+                ? null
+                : ResourceLocation.tryParse(Context.toString(itemIdValue));
+        if (patch == null || itemId == null || !BuiltInRegistries.ITEM.containsKey(itemId)) {
+            throw scriptError("Resource contains invalid item data components");
+        }
+        var stack = new ItemStack(BuiltInRegistries.ITEM.get(itemId));
+        stack.applyComponentsAndValidate(patch);
+        return AEItemKey.of(stack);
     }
 
     private FactoryBusAddress requireBus(Scriptable receiver) {

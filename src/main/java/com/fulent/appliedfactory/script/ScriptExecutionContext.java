@@ -11,6 +11,7 @@ import java.util.UUID;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.fulent.appliedfactory.factory.FactoryActionExecutor;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.part.FactoryBusPart;
@@ -31,6 +32,7 @@ public final class ScriptExecutionContext {
     private final Set<Direction> accessibleNetworks;
     private final Set<Direction> onlineNetworks;
     private final HolderLookup.Provider registries;
+    private final FactoryActionExecutor.NetworkResolver networkStorage;
 
     public ScriptExecutionContext(
             UUID workflowId,
@@ -42,7 +44,8 @@ public final class ScriptExecutionContext {
             Map<Direction, List<FactoryBusPart>> busesByNetwork,
             Set<Direction> accessibleNetworks,
             Set<Direction> onlineNetworks,
-            HolderLookup.Provider registries) {
+            HolderLookup.Provider registries,
+            FactoryActionExecutor.NetworkResolver networkStorage) {
         this.workflowId = Objects.requireNonNull(workflowId, "workflowId");
         this.tick = tick;
         this.orderNetwork = orderNetwork;
@@ -55,6 +58,7 @@ public final class ScriptExecutionContext {
         this.accessibleNetworks = Set.copyOf(accessibleNetworks);
         this.onlineNetworks = Set.copyOf(onlineNetworks);
         this.registries = Objects.requireNonNull(registries, "registries");
+        this.networkStorage = Objects.requireNonNull(networkStorage, "networkStorage");
     }
 
     public UUID workflowId() {
@@ -121,5 +125,18 @@ public final class ScriptExecutionContext {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Resolves the live ME storage endpoint for one accessible controller side.
+     * Empty when that network is offline or unconnected; resolves at read time so
+     * calls reflect the current tick.
+     */
+    public Optional<FactoryActionExecutor.NetworkEndpoint> networkStorage(Direction side) {
+        if (!accessibleNetworks.contains(side)) {
+            throw new IllegalArgumentException(
+                    "Network " + side.getName() + " is not accessible here");
+        }
+        return networkStorage.resolve(side);
     }
 }

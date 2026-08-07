@@ -11,12 +11,17 @@ import java.util.function.Predicate;
 import com.fulent.appliedfactory.script.FactoryActionResult;
 import com.fulent.appliedfactory.script.FactoryScriptAction;
 
+import com.google.gson.JsonParseException;
+
 import appeng.api.config.Actionable;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
 import appeng.api.storage.MEStorage;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
 
 /** Executes one non-waiting script action against the controller's private cache. */
@@ -46,8 +51,9 @@ public final class FactoryActionExecutor {
             case BUS_DROP -> FactoryActionResult.booleanResult(dropFromBus(job, action));
             case BUS_USE -> FactoryActionResult.booleanResult(useBus(action));
             case BUS_PLACE -> FactoryActionResult.booleanResult(placeAtBus(job, action));
-            case BUS_BREAK -> FactoryActionResult.extracted(breakBus(job, action));
+            case BUS_BREAK, BUS_BREAK_WITH -> FactoryActionResult.extracted(breakBus(job, action));
             case BUS_REDSTONE -> FactoryActionResult.booleanResult(setBusRedstone(action));
+            case RENAME_OWNED -> FactoryActionResult.extracted(renameOwned(job, action));
             case NETWORK_PUSH -> {
                 job.setRecoverySideIfAbsent(action.networkSide());
                 yield FactoryActionResult.pushed(pushToNetwork(
@@ -127,11 +133,12 @@ public final class FactoryActionExecutor {
         if (machine == null) {
             return List.of();
         }
-        var preview = resources(machine.previewBreakDrops());
+        var tool = action.resources().isEmpty() ? null : breakTool(job, action);
+        var preview = resources(machine.previewBreakDrops(tool));
         if (!cache.canStoreAll(preview)) {
             return List.of();
         }
-        var result = machine.breakAndCollect();
+        var result = machine.breakAndCollect(tool);
         if (!result.destroyed()) {
             return List.of();
         }
@@ -144,6 +151,79 @@ public final class FactoryActionExecutor {
         job.addOwned(drops);
         changed.run();
         return drops;
+    }
+
+    /**
+     * Returns the owned item unit used as the held tool for
+     * {@code BUS_BREAK_WITH}. The tool is only validated for ownership, never
+     * consumed.
+     */
+    private ItemStack breakTool(FactoryJob job, FactoryScriptAction action) {
+        if (!job.canConsumeOwned(action.resources())) {
+            throw new IllegalStateException("Workflow does not own the bus break tool");
+        }
+        var stacks = toItemStacks(action.resources());
+        if (stacks == null || stacks.size() != 1) {
+            throw new IllegalStateException("Bus break tool must be a single item resource");
+        }
+        return stacks.get(0);
+    }
+
+    /**
+     * Applies a custom display name to one owned item resource: the old key is
+     * removed from the cache, every item of that amount is renamed, the renamed
+     * key is stored back and the workflow ledger moves from the old to the new
+     * key. Returns the renamed resources now owned by the workflow.
+     */
+    private List<FactoryResource> renameOwned(FactoryJob job, FactoryScriptAction action) {
+        var resources = action.resources();
+        if (!job.canConsumeOwned(resources)) {
+            throw new IllegalStateException("Workflow does not own rename resource");
+        }
+        if (resources.size() != 1 || !(resources.get(0).key() instanceof AEItemKey)) {
+            return List.of();
+        }
+        var stacks = toItemStacks(resources);
+        if (stacks == null || stacks.isEmpty()) {
+            return List.of();
+        }
+        if (!cache.removeAll(resources)) {
+            return List.of();
+        }
+        final List<FactoryResource> renamed;
+        try {
+            var component = parseName(action.name(), job.registries());
+            var amounts = new LinkedHashMap<AEKey, Long>();
+            for (var stack : stacks) {
+                stack.set(DataComponents.CUSTOM_NAME, component);
+                amounts.merge(AEItemKey.of(stack), (long) stack.getCount(), Math::addExact);
+            }
+            renamed = fromAmounts(amounts);
+            if (!cache.storeAll(renamed)) {
+                restoreCacheOrThrow(resources, "rename", null);
+                return List.of();
+            }
+        } catch (RuntimeException exception) {
+            restoreCacheOrThrow(resources, "rename", exception);
+            return List.of();
+        }
+        job.consumeOwned(resources);
+        job.addOwned(renamed);
+        changed.run();
+        return renamed;
+    }
+
+    /** Parses a plain literal name, or a JSON serialized component when valid. */
+    private static Component parseName(String name, HolderLookup.Provider registries) {
+        try {
+            var component = Component.Serializer.fromJson(name, registries);
+            if (component != null) {
+                return component;
+            }
+        } catch (JsonParseException | IllegalArgumentException ignored) {
+            // Not a JSON component; treat as a plain literal name.
+        }
+        return Component.literal(name);
     }
 
     private boolean setBusRedstone(FactoryScriptAction action) {
