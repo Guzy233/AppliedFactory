@@ -3,11 +3,11 @@ package com.fulent.appliedfactory.script;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Supplier;
 
 import org.jetbrains.annotations.Nullable;
 import org.mozilla.javascript.BaseFunction;
@@ -41,10 +41,17 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 
 /**
- * Installs and drives the bus-centric script API for one loaded program: the scope-level
- * registration functions, the context object handed to handlers, and the bus/network/block/
- * resource prototypes. It also owns the script-facing constants that {@link RhinoScriptRuntime}
- * must exclude (and re-link) when serializing continuations.
+ * Installs and drives the bus-centric script API for one loaded program: the
+ * scope-level
+ * registration functions, the context object handed to handlers, and the
+ * bus/network/block/
+ * resource prototypes. Every name installed on the scope is recorded
+ * ({@link #scopeExclusions()})
+ * so {@link RhinoScriptRuntime} can exclude exactly those (and re-link the
+ * context object) when
+ * serializing continuations — adding a new prototype or registration function
+ * excludes it
+ * automatically.
  */
 final class RuntimeBridge {
     static final String CONTEXT_NAME = "__factoryContext";
@@ -67,6 +74,7 @@ final class RuntimeBridge {
 
     private final Context installContext;
     private final Scriptable scope;
+    private final Set<String> installedScopeNames = new LinkedHashSet<>();
     private Scriptable busPrototype;
     private Scriptable busItemsPrototype;
     private Scriptable networkPrototype;
@@ -74,7 +82,7 @@ final class RuntimeBridge {
     private Scriptable blockPrototype;
     private Scriptable resourcePrototype;
     private Scriptable contextObject;
-    private ScriptExecutionContext request;
+    private ScriptExecutionContext context;
 
     RuntimeBridge(Context context, Scriptable scope) {
         installContext = context;
@@ -82,47 +90,84 @@ final class RuntimeBridge {
     }
 
     void install(Registration registration) {
-        busPrototype = createBusPrototype();
-        busItemsPrototype = createBusItemsPrototype();
-        networkPrototype = createNetworkPrototype();
-        networkItemsPrototype = createNetworkItemsPrototype();
-        blockPrototype = createBlockPrototype();
-        resourcePrototype = createResourcePrototype();
-        ScriptableObject.putProperty(scope, BUS_PROTOTYPE_NAME, busPrototype);
-        ScriptableObject.putProperty(scope, BUS_ITEMS_PROTOTYPE_NAME, busItemsPrototype);
-        ScriptableObject.putProperty(scope, NETWORK_PROTOTYPE_NAME, networkPrototype);
-        ScriptableObject.putProperty(scope, NETWORK_ITEMS_PROTOTYPE_NAME, networkItemsPrototype);
-        ScriptableObject.putProperty(scope, BLOCK_PROTOTYPE_NAME, blockPrototype);
-        ScriptableObject.putProperty(scope, RESOURCE_PROTOTYPE_NAME, resourcePrototype);
-        ScriptableObject.putProperty(scope, INITIALIZE_NAME, initializeFunction(registration));
-        ScriptableObject.putProperty(scope, REGISTER_PATTERNS_NAME, patternsFunction(registration));
-        ScriptableObject.putProperty(scope, REGISTER_CONTROLLER_NAME,
-                controllerFunction(registration));
-        ScriptableObject.putProperty(scope, REGISTER_PASSIVE_NAME, passiveFunction(registration));
-        ScriptableObject.putProperty(scope, ITEM_NAME, itemFunction());
-        ScriptableObject.putProperty(scope, CONTEXT_NAME, Undefined.instance);
+        busPrototype = Jsify.toScriptable(installContext, scope, null, new BusPrototypeTemplate());
+        busItemsPrototype = Jsify.toScriptable(installContext, scope, null,
+                new BusItemsPrototypeTemplate());
+        networkPrototype = Jsify.toScriptable(installContext, scope, null,
+                new NetworkPrototypeTemplate());
+        networkItemsPrototype = Jsify.toScriptable(installContext, scope, null,
+                new NetworkItemsPrototypeTemplate());
+        blockPrototype = Jsify.toScriptable(installContext, scope, null,
+                new BlockPrototypeTemplate());
+        resourcePrototype = Jsify.toScriptable(installContext, scope, null,
+                new ResourcePrototypeTemplate());
+        installScope(BUS_PROTOTYPE_NAME, busPrototype);
+        installScope(BUS_ITEMS_PROTOTYPE_NAME, busItemsPrototype);
+        installScope(NETWORK_PROTOTYPE_NAME, networkPrototype);
+        installScope(NETWORK_ITEMS_PROTOTYPE_NAME, networkItemsPrototype);
+        installScope(BLOCK_PROTOTYPE_NAME, blockPrototype);
+        installScope(RESOURCE_PROTOTYPE_NAME, resourcePrototype);
+        installScope(INITIALIZE_NAME, initializeFunction(registration));
+        installScope(REGISTER_PATTERNS_NAME, patternsFunction(registration));
+        installScope(REGISTER_CONTROLLER_NAME, controllerFunction(registration));
+        installScope(REGISTER_PASSIVE_NAME, passiveFunction(registration));
+        installScope(ITEM_NAME, itemFunction());
+        installScope(CONTEXT_NAME, Undefined.instance);
+    }
+
+    /**
+     * Records every name this bridge installs on the scope. The same set is what
+     * {@link RhinoScriptRuntime} excludes (by name) when serializing continuations,
+     * so a newly
+     * installed prototype or registration function is automatically excluded — no
+     * second list to
+     * keep in sync.
+     */
+    Set<String> scopeExclusions() {
+        return Set.copyOf(installedScopeNames);
+    }
+
+    private void installScope(String name, Object value) {
+        ScriptableObject.putProperty(scope, name, value);
+        installedScopeNames.add(name);
     }
 
     /**
      * Binds this invocation's live data. A resumed live continuation passes the
-     * {@code reuseContextObject} it captured at job start, so the object the continuation
-     * graph still references stays identical to the one installed under {@link #CONTEXT_NAME}.
-     * Fresh starts and disk-restored resumes pass {@code null} to build a new one (the latter
-     * gets re-linked into the graph by name during deserialization).
+     * {@code reuseContextObject} it captured at job start, so the object the continuation graph
+     * still references stays identical to the one produced here. Fresh starts and disk-restored
+     * resumes pass {@code null} to build a new one; the latter is re-linked into the graph by
+     * name during deserialization (see {@link #exposeContext()}).
      */
     void bind(
-            ScriptExecutionContext request,
+            ScriptExecutionContext context,
             @Nullable Scriptable reuseContextObject) {
-        this.request = request;
+        this.context = context;
         contextObject = reuseContextObject != null
                 ? reuseContextObject
                 : createContextObject(Context.getCurrentContext());
-        ScriptableObject.putProperty(scope, CONTEXT_NAME, contextObject);
     }
 
     void unbind() {
-        request = null;
+        context = null;
         contextObject = null;
+    }
+
+    /**
+     * Installs the bound context object under {@link #CONTEXT_NAME}. This is only needed around
+     * the persistence points: deserialization re-links the restored continuation's {@code ctx}
+     * to this exact object by name, and serialization excludes it by name. Script execution
+     * itself never reads the slot — the handler receives {@code ctx} as its argument — so
+     * {@link #exposeContext()} is called from {@code resume()} just before inflating a
+     * disk-restored continuation, and {@code RhinoContinuation.serialize()} reinstalls it while
+     * writing.
+     */
+    void exposeContext() {
+        ScriptableObject.putProperty(scope, CONTEXT_NAME, contextObject);
+    }
+
+    /** Removes the context object from the scope again after a persistence point. */
+    void hideContext() {
         ScriptableObject.putProperty(scope, CONTEXT_NAME, Undefined.instance);
     }
 
@@ -224,119 +269,205 @@ final class RuntimeBridge {
     }
 
     private Scriptable createContextObject(Context cx) {
-        var result = cx.newObject(scope);
-        // Snapshot fields are live getters, not fixed values: this contextObject instance is
-        // reused across every resume of the job (so the continuation graph and CONTEXT_NAME
-        // stay identical for serialization), yet each read must reflect the current tick's
-        // request. bind() rebinds `request` before each resume; the getters read it live.
-        defineLiveReadOnly(result, "tick", () -> (double) request.tick());
-        defineLiveReadOnly(result, "buses",
-                () -> busArray(Context.getCurrentContext(), request.allBuses()));
-        defineReadOnly(result, "network", function((callContext, args) -> {
+        // The view holds the bridge, not a captured context: this contextObject
+        // instance is
+        // reused across every resume of a live job (so the continuation graph and
+        // CONTEXT_NAME
+        // stay identical for serialization), yet each live getter read must reflect the
+        // current
+        // tick's context. bind() rebinds `context` before each resume; the getters read
+        // it live
+        // through the bridge. The view is never serialized because the contextObject
+        // (and only
+        // objects reachable from it) is excluded from continuation serialization by
+        // name.
+        return Jsify.toScriptable(cx, scope, null, new FactoryContextView());
+    }
+
+    /**
+     * Java template for the context object handed to handlers. {@link JsLive}
+     * getters are
+     * re-invoked on every JS read through {@link Jsify}; {@link JsMethod} methods
+     * keep the
+     * existing argument coercion and arity checks. Processing-only data is
+     * {@link JsOptional}
+     * and disappears whenever the job carries no order network.
+     */
+    private final class FactoryContextView {
+        @JsLive
+        public double getTick() {
+            return context.tick();
+        }
+
+        @JsLive
+        public Object getBuses() {
+            return busArray(Context.getCurrentContext(), context.allBuses());
+        }
+
+        // Every workflow (processing, passive, initializer) may own cached resources.
+        @JsLive
+        public Object getOwned() {
+            return resourceArray(
+                    Context.getCurrentContext(), context.owned(),
+                    context.workflowId());
+        }
+
+        // Processing-only data: present exactly when the job carries an order network.
+        @JsOptional
+        @JsLive
+        public Object getInputs() {
+            return context.orderNetwork() == null
+                    ? null
+                    : resourceArray(Context.getCurrentContext(),
+                            context.inputs(), context.workflowId());
+        }
+
+        @JsOptional
+        @JsLive
+        public Object getOutputs() {
+            return context.orderNetwork() == null
+                    ? null
+                    : resourceArray(
+                            Context.getCurrentContext(), context.outputs(), null);
+        }
+
+        @JsOptional
+        @JsLive
+        public Object getOrderNetwork() {
+            return context.orderNetwork() == null
+                    ? null
+                    : networkObject(
+                            Context.getCurrentContext(), context.orderNetwork());
+        }
+
+        @JsMethod
+        public Object network(Context cx, Object[] args) {
             requireArity(args, 1, 1, "ctx.network(side)");
             var side = requireDirection(args[0], "network side");
-            if (!request.canAccess(side)) {
+            if (!context.canAccess(side)) {
                 throw scriptError("Network " + side.getName() + " is not accessible here");
             }
-            return networkObject(callContext, side);
-        }));
-        defineReadOnly(result, "log", function((callContext, args) -> {
+            return networkObject(cx, side);
+        }
+
+        @JsMethod
+        public Object log(Context cx, Object[] args) {
             requireArity(args, 1, 1, "ctx.log(message)");
             AppliedFactory.LOGGER.info("[Factory script] {}", Context.toString(args[0]));
             return Undefined.instance;
-        }));
-        defineReadOnly(result, "sleep", function((callContext, args) -> {
+        }
+
+        @JsMethod
+        public Object sleep(Context cx, Object[] args) {
             requireArity(args, 1, 1, "ctx.sleep(ticks)");
-            return suspend(callContext, FactoryScriptAction.sleep(
+            return suspend(cx, FactoryScriptAction.sleep(
                     nonNegativeInt(args[0], "sleep duration")));
-        }));
-        defineReadOnly(result, "yield", function((callContext, args) -> {
+        }
+
+        @JsMethod(name = "yield")
+        public Object doYield(Context cx, Object[] args) {
             requireArity(args, 0, 0, "ctx.yield()");
-            return suspend(callContext, FactoryScriptAction.sleep(1));
-        }));
-        defineReadOnly(result, "fail", function((callContext, args) -> {
+            return suspend(cx, FactoryScriptAction.sleep(1));
+        }
+
+        @JsMethod
+        public Object fail(Context cx, Object[] args) {
             requireArity(args, 1, 1, "ctx.fail(message)");
             throw scriptError(Context.toString(args[0]));
-        }));
-        // Every workflow (processing, passive, initializer) may own cached resources.
-        defineLiveReadOnly(result, "owned", () -> resourceArray(
-                Context.getCurrentContext(), request.owned(), request.workflowId()));
-        // Processing-only data: present exactly when the job carries an order network.
-        if (request.orderNetwork() != null) {
-            defineLiveReadOnly(result, "inputs", () -> resourceArray(
-                    Context.getCurrentContext(), request.inputs(), request.workflowId()));
-            defineLiveReadOnly(result, "outputs", () -> resourceArray(
-                    Context.getCurrentContext(), request.outputs(), null));
-            defineLiveReadOnly(result, "orderNetwork", () -> networkObject(
-                    Context.getCurrentContext(), request.orderNetwork()));
         }
-        return result;
     }
 
-    private Scriptable createBusPrototype() {
-        var result = installContext.newObject(scope);
-        defineReadOnly(result, "exists", method((cx, self, args) -> {
+    // ---- Prototype templates -------------------------------------------------
+
+    /**
+     * Shared methods for every bus handle. The receiver carries the durable bus
+     * address.
+     */
+    private final class BusPrototypeTemplate {
+        @JsMethod
+        public Object exists(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.exists()");
             return resolveBus(requireBus(self)).isPresent();
-        }));
-        defineReadOnly(result, "state", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object state(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.state()");
             var bus = resolveBus(requireBus(self)).orElse(null);
             return bus == null ? null : busStateObject(cx, bus);
-        }));
-        defineReadOnly(result, "target", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object target(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.target()");
             var bus = resolveBus(requireBus(self)).orElse(null);
-            return bus == null ? null : bus.machine().map(machine -> blockObject(cx, machine))
-                    .orElse(null);
-        }));
-        defineReadOnly(result, "items", method((cx, self, args) -> {
+            return bus == null ? null
+                    : bus.machine().map(machine -> blockObject(cx, machine))
+                            .orElse(null);
+        }
+
+        @JsMethod
+        public Object items(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.items()");
             var handle = requireBus(self);
             var bus = resolveBus(handle).orElse(null);
-            if (bus == null || bus.machine().filter(machine -> machine.hasItemStorage()).isEmpty()) {
+            if (bus == null || bus.machine()
+                    .filter(machine -> machine.hasItemStorage()).isEmpty()) {
                 return null;
             }
             return busItemsObject(cx, handle);
-        }));
-        defineReadOnly(result, "detect", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object detect(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "bus.detect(selector)");
             var bus = resolveBus(requireBus(self)).orElse(null);
             var machine = bus == null ? null : bus.machine().orElse(null);
             return machine != null && machine.matchesBlock(Context.toString(args[0]));
-        }));
-        defineReadOnly(result, "drop", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object drop(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "bus.drop(resources)");
             return suspend(cx, FactoryScriptAction.busDrop(
                     requireBus(self), parseOwned(args[0])));
-        }));
-        defineReadOnly(result, "use", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object use(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.use()");
             return suspend(cx, FactoryScriptAction.busUse(requireBus(self)));
-        }));
-        defineReadOnly(result, "place", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object place(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "bus.place(resource)");
             return suspend(cx, FactoryScriptAction.busPlace(
                     requireBus(self), parseOwnedUnit(args[0])));
-        }));
-        defineReadOnly(result, "break", method((cx, self, args) -> {
+        }
+
+        @JsMethod(name = "break")
+        public Object doBreak(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.break()");
             return suspend(cx, FactoryScriptAction.busBreak(requireBus(self)));
-        }));
-        defineReadOnly(result, "redstone", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object redstone(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "bus.redstone(level)");
             var level = nonNegativeInt(args[0], "redstone level");
             if (level > 15) {
                 throw scriptError("redstone level must be between 0 and 15");
             }
-            return suspend(cx, FactoryScriptAction.busRedstone(requireBus(self), level));
-        }));
-        return result;
+            return suspend(cx,
+                    FactoryScriptAction.busRedstone(requireBus(self), level));
+        }
     }
 
-    private Scriptable createBusItemsPrototype() {
-        var result = installContext.newObject(scope);
-        defineReadOnly(result, "read", method((cx, self, args) -> {
+    /** Shared methods for a bus's item storage handle. */
+    private final class BusItemsPrototypeTemplate {
+        @JsMethod
+        public Object read(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.items().read()");
             var bus = resolveBus(requireBus(self)).orElse(null);
             if (bus == null) {
@@ -345,50 +476,59 @@ final class RuntimeBridge {
             var resources = bus.machine().map(machine -> resources(machine.items()))
                     .orElse(List.of());
             return resourceArray(cx, resources, null);
-        }));
-        defineReadOnly(result, "push", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object push(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "bus.items().push(resources)");
             return suspend(cx, FactoryScriptAction.busPush(
                     requireBus(self), parseOwned(args[0])));
-        }));
-        defineReadOnly(result, "extract", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object extract(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.items().extract()");
             return suspend(cx, FactoryScriptAction.busExtract(requireBus(self)));
-        }));
-        return result;
+        }
     }
 
-    private Scriptable createNetworkPrototype() {
-        var result = installContext.newObject(scope);
-        defineReadOnly(result, "online", method((cx, self, args) -> {
+    /** Shared methods for a network handle. */
+    private final class NetworkPrototypeTemplate {
+        @JsMethod
+        public Object online(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "network.online()");
-            return request.isOnline(requireNetwork(self));
-        }));
-        defineReadOnly(result, "items", method((cx, self, args) -> {
+            return context.isOnline(requireNetwork(self));
+        }
+
+        @JsMethod
+        public Object items(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "network.items()");
             return networkItemsObject(cx, requireNetwork(self));
-        }));
-        return result;
+        }
     }
 
-    private Scriptable createNetworkItemsPrototype() {
-        var result = installContext.newObject(scope);
-        defineReadOnly(result, "push", method((cx, self, args) -> {
+    /** Shared methods for a network's item storage handle. */
+    private final class NetworkItemsPrototypeTemplate {
+        @JsMethod
+        public Object push(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "network.items().push(resources)");
             return suspend(cx, FactoryScriptAction.networkPush(
                     requireNetwork(self), parseOwned(args[0])));
-        }));
-        defineReadOnly(result, "extract", method((cx, self, args) -> {
+        }
+
+        @JsMethod
+        public Object extract(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "network.items().extract(requests)");
             return suspend(cx, FactoryScriptAction.networkExtract(
-                    requireNetwork(self), parseResourceSpecs(args[0], "network requests")));
-        }));
-        return result;
+                    requireNetwork(self),
+                    parseResourceSpecs(args[0], "network requests")));
+        }
     }
 
-    private Scriptable createResourcePrototype() {
-        var result = installContext.newObject(scope);
-        defineReadOnly(result, "matches", method((cx, self, args) -> {
+    /** Shared method for every resource object. */
+    private final class ResourcePrototypeTemplate {
+        @JsMethod
+        public Object matches(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "resource.matches(selector)");
             if (self.getPrototype() != resourcePrototype) {
                 throw scriptError("Resource method received an invalid receiver");
@@ -402,13 +542,13 @@ final class RuntimeBridge {
             }
             var id = ResourceLocation.tryParse(selector);
             return id != null && id.equals(key.getId());
-        }));
-        return result;
+        }
     }
 
-    private Scriptable createBlockPrototype() {
-        var result = installContext.newObject(scope);
-        defineReadOnly(result, "matches", method((cx, self, args) -> {
+    /** Shared method for every block view. */
+    private final class BlockPrototypeTemplate {
+        @JsMethod
+        public Object matches(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "block.matches(selector)");
             if (self.getPrototype() != blockPrototype) {
                 throw scriptError("Block method received an invalid receiver");
@@ -430,45 +570,34 @@ final class RuntimeBridge {
             // Compare the canonical ids rather than relying on the particular
             // ResourceLocation instance restored by Rhino's script state.
             return selectorId != null && id.toString().equals(selectorId.toString());
-        }));
-        return result;
+        }
     }
+
+    // ---- Object factories ----------------------------------------------------
 
     private Scriptable busObject(Context cx, FactoryBusPart bus) {
         var address = bus.address().orElseThrow();
-        var result = cx.newObject(scope);
-        result.setPrototype(busPrototype);
-        defineInternal(result, BUS_ADDRESS_PROPERTY, encodeAddress(address));
-        defineReadOnly(result, "address", busAddressObject(cx, address));
         var targetPosition = address.hostPosition().relative(address.side());
-        defineReadOnly(result, "targetAddress",
-                blockAddressObject(cx, address.dimension(), targetPosition));
-        defineReadOnly(result, "targetFace", address.side().getName());
-
-        return result;
+        return Jsify.toScriptable(cx, scope, busPrototype, new BusView(
+                encodeAddress(address),
+                busAddressObject(cx, address),
+                blockAddressObject(cx, address.dimension(), targetPosition),
+                address.side().getName()));
     }
 
     private Scriptable busItemsObject(Context cx, FactoryBusAddress address) {
-        var result = cx.newObject(scope);
-        result.setPrototype(busItemsPrototype);
-        defineInternal(result, BUS_ADDRESS_PROPERTY, encodeAddress(address));
-        return result;
+        return Jsify.toScriptable(cx, scope, busItemsPrototype,
+                new BusItemsView(encodeAddress(address)));
     }
 
     private Scriptable networkObject(Context cx, Direction side) {
-        var result = cx.newObject(scope);
-        result.setPrototype(networkPrototype);
-        defineInternal(result, NETWORK_SIDE_PROPERTY, side.getName());
-        defineReadOnly(result, "side", side.getName());
-        defineReadOnly(result, "buses", busArray(cx, request.buses(side)));
-        return result;
+        return Jsify.toScriptable(cx, scope, networkPrototype,
+                new NetworkView(side.getName(), busArray(cx, context.buses(side))));
     }
 
     private Scriptable networkItemsObject(Context cx, Direction side) {
-        var result = cx.newObject(scope);
-        result.setPrototype(networkItemsPrototype);
-        defineInternal(result, NETWORK_SIDE_PROPERTY, side.getName());
-        return result;
+        return Jsify.toScriptable(cx, scope, networkItemsPrototype,
+                new NetworkItemsView(side.getName()));
     }
 
     private Scriptable busArray(Context cx, List<FactoryBusPart> buses) {
@@ -483,78 +612,191 @@ final class RuntimeBridge {
     }
 
     private Scriptable busAddressObject(Context cx, FactoryBusAddress address) {
-        var result = cx.newObject(scope);
-        defineReadOnly(result, "dimension", address.dimension().toString());
-        defineReadOnly(result, "hostX", address.hostPosition().getX());
-        defineReadOnly(result, "hostY", address.hostPosition().getY());
-        defineReadOnly(result, "hostZ", address.hostPosition().getZ());
-        defineReadOnly(result, "partSide", address.side().getName());
-        defineReadOnly(result, "key", encodeAddress(address));
-        return result;
+        var position = address.hostPosition();
+        return Jsify.toScriptable(cx, scope, null, new BusAddressView(
+                address.dimension().toString(),
+                position.getX(), position.getY(), position.getZ(),
+                address.side().getName(),
+                encodeAddress(address)));
     }
 
     private Scriptable blockAddressObject(
             Context cx, ResourceLocation dimension, BlockPos position) {
-        var result = cx.newObject(scope);
-        defineReadOnly(result, "dimension", dimension.toString());
-        defineReadOnly(result, "x", position.getX());
-        defineReadOnly(result, "y", position.getY());
-        defineReadOnly(result, "z", position.getZ());
-        defineReadOnly(result, "key", dimension + ":" + position.asLong());
-        return result;
+        return Jsify.toScriptable(cx, scope, null, new BlockAddressView(
+                dimension.toString(),
+                position.getX(), position.getY(), position.getZ(),
+                dimension + ":" + position.asLong()));
     }
 
     private Scriptable busStateObject(Context cx, FactoryBusPart bus) {
-        var result = cx.newObject(scope);
-        defineReadOnly(result, "active", bus.isActive());
-        defineReadOnly(result, "powered", bus.isPowered());
-        defineReadOnly(result, "redstone",
-                bus.machine().map(machine -> machine.redstoneLevel()).orElse(0));
         var upgrades = cx.newObject(scope);
         defineReadOnly(upgrades, "acceleration", bus.accelerationCards());
-        defineReadOnly(result, "upgrades", upgrades);
-        defineReadOnly(result, "config", cx.newObject(scope));
-        return result;
+        return Jsify.toScriptable(cx, scope, null, new BusStateView(
+                bus.isActive(),
+                bus.isPowered(),
+                bus.machine().map(machine -> machine.redstoneLevel()).orElse(0),
+                upgrades,
+                cx.newObject(scope)));
     }
 
     private Scriptable blockObject(Context cx,
             com.fulent.appliedfactory.factory.FactoryMachineAccess machine) {
-        var result = cx.newObject(scope);
-        result.setPrototype(blockPrototype);
-        defineReadOnly(result, "id", machine.blockId().toString());
         var state = cx.newObject(scope);
         var blockState = machine.blockState();
         for (var property : blockState.getProperties()) {
             defineReadOnly(state, property.getName(), propertyName(blockState, property));
         }
-        defineReadOnly(result, "state", state);
         var blockEntityType = machine.blockEntityTypeId();
-        defineReadOnly(result, "blockEntityType",
-                blockEntityType == null ? null : blockEntityType.toString());
-        return result;
+        return Jsify.toScriptable(cx, scope, blockPrototype, new BlockView(
+                machine.blockId().toString(),
+                state,
+                blockEntityType == null ? null : blockEntityType.toString()));
     }
 
     private Scriptable itemResourceObject(Context cx, ResourceLocation id, long amount) {
-        var result = cx.newObject(scope);
-        result.setPrototype(resourcePrototype);
-        defineReadOnly(result, "id", id.toString());
-        defineReadOnly(result, "amount", (double) amount);
-        defineInternal(result, RESOURCE_ITEM_PROPERTY, id.toString());
-        defineInternal(result, RESOURCE_OWNER_PROPERTY, "");
-        return result;
+        return Jsify.toScriptable(cx, scope, resourcePrototype,
+                new ItemResourceView(id.toString(), (double) amount));
     }
 
     private Scriptable resourceObject(
             Context cx, FactoryResource resource, UUID owner) {
-        var result = cx.newObject(scope);
-        result.setPrototype(resourcePrototype);
-        defineReadOnly(result, "id", resource.id().toString());
-        defineReadOnly(result, "amount", (double) resource.amount());
-        defineInternal(result, RESOURCE_KEY_PROPERTY,
-                resource.key().toTagGeneric(request.registries()).toString());
-        defineInternal(result, RESOURCE_OWNER_PROPERTY,
-                owner == null ? "" : owner.toString());
-        return result;
+        // Pure snapshot: the durable brand (exact AE key / owner) is carried as
+        // non-enumerable
+        // string handles so the object survives continuation serialization and
+        // resourceKey()
+        // still validates it after a disk restore.
+        return Jsify.toScriptable(cx, scope, resourcePrototype, new ResourceView(
+                resource.id().toString(),
+                resource.amount(),
+                resource.key().toTagGeneric(context.registries()).toString(),
+                owner == null ? "" : owner.toString()));
+    }
+
+    /** Java template for the script-facing resource objects. */
+    private record ResourceView(
+            @JsReadOnly String id,
+            @JsReadOnly double amount,
+            @JsInternal(name = RESOURCE_KEY_PROPERTY) String key,
+            @JsInternal(name = RESOURCE_OWNER_PROPERTY) String owner) {
+    }
+
+    /** Java template for a bus handle. */
+    private record BusView(
+            @JsInternal(name = BUS_ADDRESS_PROPERTY) String busAddress,
+            @JsReadOnly Scriptable address,
+            @JsReadOnly Scriptable targetAddress,
+            @JsReadOnly String targetFace) {
+    }
+
+    /** Java template for a bus item storage handle. */
+    private record BusItemsView(
+            @JsInternal(name = BUS_ADDRESS_PROPERTY) String busAddress) {
+    }
+
+    /** Java template for a network handle. */
+    private static final class NetworkView {
+        private final String side;
+        private final Scriptable buses;
+
+        private NetworkView(String side, Scriptable buses) {
+            this.side = side;
+            this.buses = buses;
+        }
+
+        @JsInternal(name = NETWORK_SIDE_PROPERTY)
+        public String getNetworkSide() {
+            return side;
+        }
+
+        @JsReadOnly
+        public String getSide() {
+            return side;
+        }
+
+        @JsReadOnly
+        public Scriptable getBuses() {
+            return buses;
+        }
+    }
+
+    /** Java template for a network item storage handle. */
+    private static final class NetworkItemsView {
+        private final String side;
+
+        private NetworkItemsView(String side) {
+            this.side = side;
+        }
+
+        @JsInternal(name = NETWORK_SIDE_PROPERTY)
+        public String getNetworkSide() {
+            return side;
+        }
+    }
+
+    /** Java template for {@code bus.address}. */
+    private record BusAddressView(
+            @JsReadOnly String dimension,
+            @JsReadOnly int hostX,
+            @JsReadOnly int hostY,
+            @JsReadOnly int hostZ,
+            @JsReadOnly String partSide,
+            @JsReadOnly String key) {
+    }
+
+    /** Java template for {@code bus.targetAddress}. */
+    private record BlockAddressView(
+            @JsReadOnly String dimension,
+            @JsReadOnly int x,
+            @JsReadOnly int y,
+            @JsReadOnly int z,
+            @JsReadOnly String key) {
+    }
+
+    /** Java template for {@code bus.state()}. */
+    private record BusStateView(
+            @JsReadOnly boolean active,
+            @JsReadOnly boolean powered,
+            @JsReadOnly int redstone,
+            @JsReadOnly Scriptable upgrades,
+            @JsReadOnly Scriptable config) {
+    }
+
+    /** Java template for {@code bus.target()}. */
+    private record BlockView(
+            @JsReadOnly String id,
+            @JsReadOnly Scriptable state,
+            @JsReadOnly String blockEntityType) {
+    }
+
+    /** Java template for the {@code item()} global result. */
+    private static final class ItemResourceView {
+        private final String id;
+        private final double amount;
+
+        private ItemResourceView(String id, double amount) {
+            this.id = id;
+            this.amount = amount;
+        }
+
+        @JsReadOnly
+        public String getId() {
+            return id;
+        }
+
+        @JsReadOnly
+        public double getAmount() {
+            return amount;
+        }
+
+        @JsInternal(name = RESOURCE_ITEM_PROPERTY)
+        public String getItemId() {
+            return id;
+        }
+
+        @JsInternal(name = RESOURCE_OWNER_PROPERTY)
+        public String getOwner() {
+            return "";
+        }
     }
 
     private Scriptable resourceArray(
@@ -567,7 +809,7 @@ final class RuntimeBridge {
 
     private List<FactoryResource> parseOwned(Object value) {
         var resources = parseResourceObjects(value, "owned resources");
-        var owner = request.workflowId().toString();
+        var owner = context.workflowId().toString();
         for (var object : resources) {
             var objectOwner = ScriptableObject.getProperty(object, RESOURCE_OWNER_PROPERTY);
             if (objectOwner == Scriptable.NOT_FOUND
@@ -576,24 +818,28 @@ final class RuntimeBridge {
             }
         }
         var parsed = normalizeParsed(resources);
-        if (!canSubtract(request.owned(), parsed)) {
+        if (!canSubtract(context.owned(), parsed)) {
             throw scriptError("Workflow no longer owns the requested resource amount");
         }
         return parsed;
     }
 
-    /** Returns exactly one owned item while allowing a larger owned stack to be placed gradually. */
+    /**
+     * Returns exactly one owned item while allowing a larger owned stack to be
+     * placed gradually.
+     */
     private FactoryResource parseOwnedUnit(Object value) {
         var object = requireResource(value, "placement resource");
         var owner = ScriptableObject.getProperty(object, RESOURCE_OWNER_PROPERTY);
         if (owner == Scriptable.NOT_FOUND
-                || !request.workflowId().toString().equals(Context.toString(owner))) {
+                || !context.workflowId().toString().equals(Context.toString(owner))) {
             throw scriptError("place only accepts a resource owned by this workflow");
         }
-        // Read and validate the visible amount even though one item is consumed per call.
+        // Read and validate the visible amount even though one item is consumed per
+        // call.
         positiveLong(ScriptableObject.getProperty(object, "amount"), "resource amount");
         var resource = new FactoryResource(resourceKey(object), 1);
-        if (!canSubtract(request.owned(), List.of(resource))) {
+        if (!canSubtract(context.owned(), List.of(resource))) {
             throw scriptError("Workflow no longer owns a resource that can be placed");
         }
         return resource;
@@ -624,11 +870,14 @@ final class RuntimeBridge {
             throw scriptError(name + " must contain resources created by this API");
         }
 
-        // Rhino serializes a suspended continuation when an action yields.  On resume it
-        // can restore the resource object's JavaScript prototype as a distinct Java object,
-        // despite retaining all of the immutable descriptor fields.  Prototype reference
-        // equality would therefore reject an OwnedResource returned by extract()/break().
-        // The hidden, permanent fields are the durable API brand; resourceKey() still fully
+        // Rhino serializes a suspended continuation when an action yields. On resume it
+        // can restore the resource object's JavaScript prototype as a distinct Java
+        // object,
+        // despite retaining all of the immutable descriptor fields. Prototype reference
+        // equality would therefore reject an OwnedResource returned by
+        // extract()/break().
+        // The hidden, permanent fields are the durable API brand; resourceKey() still
+        // fully
         // validates their content before anything reaches the game state.
         var exactKey = ScriptableObject.getProperty(object, RESOURCE_KEY_PROPERTY);
         var itemId = ScriptableObject.getProperty(object, RESOURCE_ITEM_PROPERTY);
@@ -658,7 +907,7 @@ final class RuntimeBridge {
         if (keyTag != Scriptable.NOT_FOUND) {
             try {
                 var key = AEKey.fromTagGeneric(
-                        request.registries(), TagParser.parseTag(Context.toString(keyTag)));
+                        context.registries(), TagParser.parseTag(Context.toString(keyTag)));
                 if (key != null) {
                     return key;
                 }
@@ -691,22 +940,25 @@ final class RuntimeBridge {
         var side = sideValue == Scriptable.NOT_FOUND
                 ? null
                 : Direction.byName(Context.toString(sideValue));
-        if (side == null || !request.canAccess(side)) {
+        if (side == null || !context.canAccess(side)) {
             throw scriptError("Network handle is invalid or inaccessible");
         }
         return side;
     }
 
     private Optional<FactoryBusPart> resolveBus(FactoryBusAddress address) {
-        return request.resolveBus(address);
+        return context.resolveBus(address);
     }
 
-    /** Converts a job-level action result back into the value the suspended API call returns. */
+    /**
+     * Converts a job-level action result back into the value the suspended API call
+     * returns.
+     */
     Object resultValue(FactoryActionResult result) {
         return switch (result.kind()) {
             case BOOLEAN -> result.success();
             case RESOURCES -> resourceArray(
-                    Context.getCurrentContext(), result.resources(), request.workflowId());
+                    Context.getCurrentContext(), result.resources(), context.workflowId());
             case VOID -> Undefined.instance;
         };
     }
@@ -869,71 +1121,12 @@ final class RuntimeBridge {
         };
     }
 
-    private static BaseFunction method(BridgeMethod call) {
-        return new BaseFunction() {
-            private static final long serialVersionUID = 1L;
-
-            @Override
-            public Object call(
-                    Context context,
-                    Scriptable callScope,
-                    Scriptable thisObject,
-                    Object[] args) {
-                return call.call(context, thisObject, args);
-            }
-        };
-    }
-
     private static void defineReadOnly(Scriptable object, String name, Object value) {
-        if (object instanceof ScriptableObject scriptable) {
-            scriptable.defineProperty(
-                    name, value, ScriptableObject.READONLY | ScriptableObject.PERMANENT);
-            return;
-        }
-        throw new IllegalStateException("Factory script objects must support fixed properties");
-    }
-
-    /**
-     * A read-only property whose value is recomputed from the live bridge state on each read.
-     * The getter Supplier captures the bridge (not serializable), which is fine: contextObject
-     * is excluded by name at serialization, so these slots are never written to disk. The
-     * setter rejects writes to keep the same contract as {@link #defineReadOnly}.
-     */
-    private static void defineLiveReadOnly(
-            Scriptable object, String name, Supplier<Object> getter) {
-        if (object instanceof ScriptableObject scriptable) {
-            scriptable.defineProperty(
-                    name,
-                    getter,
-                    value -> {
-                        throw scriptError("ctx." + name + " is read-only");
-                    },
-                    ScriptableObject.PERMANENT);
-            return;
-        }
-        throw new IllegalStateException("Factory script objects must support fixed properties");
-    }
-
-    private static void defineInternal(Scriptable object, String name, Object value) {
-        if (object instanceof ScriptableObject scriptable) {
-            scriptable.defineProperty(
-                    name,
-                    value,
-                    ScriptableObject.READONLY
-                            | ScriptableObject.PERMANENT
-                            | ScriptableObject.DONTENUM);
-            return;
-        }
-        throw new IllegalStateException("Factory script objects must support internal properties");
+        Jsify.defineReadOnly(object, name, value);
     }
 
     @FunctionalInterface
     private interface BridgeCall {
         Object call(Context context, Object[] args);
-    }
-
-    @FunctionalInterface
-    private interface BridgeMethod {
-        Object call(Context context, Scriptable receiver, Object[] args);
     }
 }

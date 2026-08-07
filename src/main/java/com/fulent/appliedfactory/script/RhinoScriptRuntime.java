@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputFilter;
 import java.util.Arrays;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 import org.mozilla.javascript.Context;
@@ -60,7 +61,7 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
 
     @Override
     public ScriptStep startHandler(
-            ScriptHandlerRef handler, ScriptExecutionContext request) {
+            ScriptHandlerRef handler, ScriptExecutionContext context) {
         var loaded = environment;
         if (loaded == null) {
             return new ScriptStep.Failed("Factory program is not loaded");
@@ -74,11 +75,11 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
             return new ScriptStep.Failed("Factory handler is not registered: " + handler.kind());
         }
         try {
-            return inContext(context -> {
-                loaded.bridge().bind(request, null);
+            return inContext(cx -> {
+                loaded.bridge().bind(context, null);
                 try {
                     try {
-                        context.callFunctionWithContinuations(function, loaded.scope(),
+                        cx.callFunctionWithContinuations(function, loaded.scope(),
                                 new Object[] { loaded.bridge().contextObject() });
                         return new ScriptStep.Completed();
                     } catch (ContinuationPending pending) {
@@ -110,7 +111,7 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
 
     @Override
     public ScriptStep resume(
-            ScriptExecutionContext request,
+            ScriptExecutionContext context,
             ScriptContinuation continuation,
             FactoryActionResult result) {
         var loaded = environment;
@@ -121,14 +122,21 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
             return new ScriptStep.Failed("Invalid or missing factory script continuation");
         }
         try {
-            return inContext(context -> {
+            return inContext(cx -> {
                 // A live continuation still references the contextObject it captured at job
                 // start; reuse it so the graph and CONTEXT_NAME stay identical. A disk-restored
                 // one has none — bind builds a fresh contextObject that deserialization re-links.
                 var reuse = continuation instanceof RhinoContinuation live
                         ? live.contextObject()
                         : null;
-                loaded.bridge().bind(request, reuse);
+                loaded.bridge().bind(context, reuse);
+                // Only a disk-restored continuation re-links its ctx by name during inflate, so
+                // the fresh context object must be resolvable under CONTEXT_NAME for that one
+                // persistence step. Live resumes reference the object directly through the graph.
+                var relink = !(continuation instanceof RhinoContinuation);
+                if (relink) {
+                    loaded.bridge().exposeContext();
+                }
                 try {
                     final Object restored;
                     try {
@@ -138,13 +146,16 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
                                 "Cannot restore factory script continuation", exception);
                     }
                     try {
-                        context.resumeContinuation(restored, loaded.scope(),
+                        cx.resumeContinuation(restored, loaded.scope(),
                                 loaded.bridge().resultValue(result));
                         return new ScriptStep.Completed();
                     } catch (ContinuationPending pending) {
                         return suspend(loaded.bridge(), pending);
                     }
                 } finally {
+                    if (relink) {
+                        loaded.bridge().hideContext();
+                    }
                     loaded.bridge().unbind();
                 }
             });
@@ -164,7 +175,7 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
         // under CONTEXT_NAME so ScriptableOutputStream can exclude it by name.
         return new ScriptStep.Suspended(
                 new RhinoContinuation(pending.getContinuation(), bridge.scope(),
-                        bridge.contextObject()),
+                        bridge.contextObject(), bridge.scopeExclusions()),
                 action);
     }
 
@@ -184,22 +195,15 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
         return deserializeContinuation(bytes, scope);
     }
 
-    private static byte[] serializeContinuation(Object continuation, Scriptable scope)
-            throws IOException {
+    private static byte[] serializeContinuation(
+            Object continuation, Scriptable scope, Set<String> exclusions) throws IOException {
         var bytes = new ByteArrayOutputStream();
         try (var output = new ScriptableOutputStream(bytes, scope)) {
-            output.addExcludedName(RuntimeBridge.CONTEXT_NAME);
-            output.addExcludedName(RuntimeBridge.BUS_PROTOTYPE_NAME);
-            output.addExcludedName(RuntimeBridge.BUS_ITEMS_PROTOTYPE_NAME);
-            output.addExcludedName(RuntimeBridge.NETWORK_PROTOTYPE_NAME);
-            output.addExcludedName(RuntimeBridge.NETWORK_ITEMS_PROTOTYPE_NAME);
-            output.addExcludedName(RuntimeBridge.BLOCK_PROTOTYPE_NAME);
-            output.addExcludedName(RuntimeBridge.RESOURCE_PROTOTYPE_NAME);
-            output.addExcludedName(RuntimeBridge.INITIALIZE_NAME);
-            output.addExcludedName(RuntimeBridge.REGISTER_PATTERNS_NAME);
-            output.addExcludedName(RuntimeBridge.REGISTER_CONTROLLER_NAME);
-            output.addExcludedName(RuntimeBridge.REGISTER_PASSIVE_NAME);
-            output.addExcludedName(RuntimeBridge.ITEM_NAME);
+            // Exclude every scope name the bridge installs (prototypes, registration functions,
+            // the context object): those carry live bridge state that must never be persisted.
+            for (var name : exclusions) {
+                output.addExcludedName(name);
+            }
             output.writeObject(continuation);
         }
         var result = bytes.toByteArray();
@@ -251,13 +255,18 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
         private final Object continuation;
         private final Scriptable scope;
         private final Scriptable capturedContextObject;
+        private final Set<String> exclusions;
         private byte[] cached;
 
         private RhinoContinuation(
-                Object continuation, Scriptable scope, Scriptable capturedContextObject) {
+                Object continuation,
+                Scriptable scope,
+                Scriptable capturedContextObject,
+                Set<String> exclusions) {
             this.continuation = continuation;
             this.scope = scope;
             this.capturedContextObject = capturedContextObject;
+            this.exclusions = Set.copyOf(exclusions);
         }
 
         private Object raw() {
@@ -278,12 +287,13 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
                 cached = inContext(cx -> {
                     // The continuation graph references capturedContextObject via the script's
                     // ctx local. ScriptableOutputStream can only exclude it (its closures are not
-                    // serializable) if CONTEXT_NAME resolves to that exact instance. bind/unbind
-                    // has since cleared it, so reinstall it for the write, then restore.
+                    // serializable) if CONTEXT_NAME resolves to that exact instance. bind() no
+                    // longer manages the slot (script execution never reads it), so install it
+                    // here for the write, then restore.
                     var previous = ScriptableObject.getProperty(scope, RuntimeBridge.CONTEXT_NAME);
                     ScriptableObject.putProperty(scope, RuntimeBridge.CONTEXT_NAME, capturedContextObject);
                     try {
-                        return serializeContinuation(continuation, scope);
+                        return serializeContinuation(continuation, scope, exclusions);
                     } catch (IOException exception) {
                         throw new IllegalStateException(
                                 "Cannot persist factory script continuation", exception);

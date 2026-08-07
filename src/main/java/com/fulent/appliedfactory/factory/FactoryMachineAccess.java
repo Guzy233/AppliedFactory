@@ -37,9 +37,11 @@ import net.neoforged.neoforge.items.IItemHandler;
 /**
  * Capability-based access to the machine face targeted by a factory bus.
  *
- * <p>This class deliberately contains no AE or scripting concepts. The job
+ * <p>
+ * This class deliberately contains no AE or scripting concepts. The job
  * runtime exposes a narrow wrapper around it to Rhino without teaching the part
- * about recipes or callbacks.</p>
+ * about recipes or callbacks.
+ * </p>
  */
 public final class FactoryMachineAccess {
     private static final GameProfile FACTORY_ACTOR = new GameProfile(
@@ -51,9 +53,10 @@ public final class FactoryMachineAccess {
     private final Direction accessDirection;
 
     /**
-     * @param level The world containing the target block
-     * @param position The target block's position
-     * @param accessDirection The direction from the bus toward the target (used for capability queries)
+     * @param level           The world containing the target block
+     * @param position        The target block's position
+     * @param accessDirection The direction from the bus toward the target (used for
+     *                        capability queries)
      */
     public FactoryMachineAccess(Level level, BlockPos position, Direction accessDirection) {
         this.level = level;
@@ -135,7 +138,10 @@ public final class FactoryMachineAccess {
         }
     }
 
-    /** Places one block item into an empty target position using the same fake player. */
+    /**
+     * Places one block item into an empty target position using the same fake
+     * player.
+     */
     public boolean place(ItemStack stack) {
         if (!isLoaded() || !blockState().isAir() || !(stack.getItem() instanceof BlockItem)) {
             return false;
@@ -166,8 +172,10 @@ public final class FactoryMachineAccess {
     }
 
     /**
-     * Breaks the target after the standard NeoForge break event, returning its player drops instead
-     * of spawning them into the world. The caller is responsible for storing those drops.
+     * Breaks the target after the standard NeoForge break event, returning its
+     * player drops instead
+     * of spawning them into the world. The caller is responsible for storing those
+     * drops.
      */
     public BreakResult breakAndCollect() {
         if (!(level instanceof ServerLevel serverLevel) || !isLoaded() || blockState().isAir()) {
@@ -260,7 +268,10 @@ public final class FactoryMachineAccess {
         return count;
     }
 
-    /** Counts only matching items that this machine face actually permits extracting. */
+    /**
+     * Counts only matching items that this machine face actually permits
+     * extracting.
+     */
     public long countExtractable(ItemStack template) {
         var handler = itemHandler();
         if (handler == null || template.isEmpty()) {
@@ -295,7 +306,9 @@ public final class FactoryMachineAccess {
         return remainder;
     }
 
-    /** Simulates the complete recipe batch against one virtual inventory snapshot. */
+    /**
+     * Simulates the complete recipe batch against one virtual inventory snapshot.
+     */
     public boolean canInsertAll(List<ItemStack> stacks) {
         var handler = itemHandler();
         if (handler == null) {
@@ -346,7 +359,9 @@ public final class FactoryMachineAccess {
         return List.copyOf(rejected);
     }
 
-    /** Emergency preservation path for a handler that violates simulation semantics. */
+    /**
+     * Emergency preservation path for a handler that violates simulation semantics.
+     */
     public void dropItems(List<ItemStack> stacks) {
         if (level.isClientSide) {
             return;
@@ -411,8 +426,10 @@ public final class FactoryMachineAccess {
         if (!isLoaded()) {
             return null;
         }
-        // Use the access direction for capability queries. For sided machines like furnaces,
-        // this determines which slots are exposed (e.g., furnace top = input, bottom = output).
+        // Use the access direction for capability queries. For sided machines like
+        // furnaces,
+        // this determines which slots are exposed (e.g., furnace top = input, bottom =
+        // output).
         return level.getCapability(Capabilities.ItemHandler.BLOCK, position, accessDirection);
     }
 

@@ -8,10 +8,10 @@ public interface ScriptRuntime {
      * Starts any registered handler (initializer, controller, pattern or passive). The handler
      * may suspend; the returned step then carries its continuation for later {@link #resume}.
      */
-    ScriptStep startHandler(ScriptHandlerRef handler, ScriptExecutionContext request);
+    ScriptStep startHandler(ScriptHandlerRef handler, ScriptExecutionContext context);
 
     ScriptStep resume(
-            ScriptExecutionContext request,
+            ScriptExecutionContext context,
             ScriptContinuation continuation,
             FactoryActionResult result);
 }
