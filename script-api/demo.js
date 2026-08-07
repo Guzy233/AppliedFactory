@@ -137,7 +137,9 @@ function feedFurnace(ctx, resources) {
 
     for (var index = 0; index < lines.length; index++) {
       var line = lines[index];
-      if (line.input.items()?.push(resources)) {
+      var items = line.input.items();
+      if (items !== null && items.canPush(resources)) {
+        items.push(resources);
         return line;
       }
     }
@@ -161,15 +163,13 @@ function collectFurnaceOutput(ctx, output) {
 }
 
 /**
- * Return owned resources to an AE network, retrying only while it is full/offline.
+ * Return owned resources to an AE network; push suspends and retries until accepted.
  * @param {BaseContext} ctx
  * @param {Network} network
  * @param {readonly OwnedResource[]} resources
  */
 function deliverToNetwork(ctx, network, resources) {
-  while (!network.items().push(resources)) {
-    ctx.sleep(5);
-  }
+  network.items().push(resources);
 }
 
 /**

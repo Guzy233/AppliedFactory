@@ -491,7 +491,9 @@ const stillOwned = ctx.owned;
 ```ts
 interface BusItems {
   read(): readonly Resource[];
-  push(resources: OwnedResource | readonly OwnedResource[]): boolean;
+  push(resources: OwnedResource | readonly OwnedResource[]): true;
+  pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
+  canPush(resources: Resource | readonly Resource[]): boolean;
   extract(): readonly OwnedResource[];
 }
 ```
@@ -502,17 +504,31 @@ interface BusItems {
 
 ### 10.2 `push(resources)`
 
-向这个 Bus 地址精确推送给定的完整资源集合：
+挂起并向这个 Bus 地址精确推送给定的完整资源集合，**每服务端 tick 重试一次，直到全部数量一次性被目标接受后才返回 `true`**：
 
-- 返回 `true`：全部数量已经推送；
-- 返回 `false`：没有资源被推送；
-- 不允许部分成功；
-- 只尝试当前地址一次；
-- 不等待容量，不重新选择 Bus，不重新求值参数。
+- 只在目标能完整接收时推送，不允许部分成功；
+- 推送失败时脚本不会恢复，同一动作在下一 tick 重试；
+- 目标持续无法接收（消失、capability 不存在或容量不足）时，workflow 一直挂起在调用点；
+- 需要非阻塞判断时先用 `canPush` 查询，再决定是否等待。
 
-参数非法、资源不属于当前 workflow 或资源数量已被消费时抛出脚本错误。目标消失、capability 不存在或容量不足统一返回 `false`。
+参数非法、资源不属于当前 workflow 或资源数量已被消费时抛出脚本错误。这与 AE 下单语义一致：AE 的 processing 任务同样在目标无法接收全部输入时等待。
 
-### 10.3 `extract()`
+### 10.3 `pushTillFull(resources)`
+
+挂起并每 tick 向目标推送**当前能接受的部分输入**，直到整个资源列表全部进入目标后返回 `true`：
+
+- 每 tick 只尝试一次，按能容纳的量逐步填充目标；
+- 每 tick 已成功推送的部分会从 workflow 所有权中扣除，剩余部分下一 tick 继续；
+- 目标每次只能收一点时（例如熔炉输入槽），用这个函数代替 `push` 可以持续补料直到全部输入被消耗；
+- 目标一直不可用时同样持续挂起。
+
+`push` 与 `pushTillFull` 的分工：`push` 要求一次精确全部、绝不部分；`pushTillFull` 允许部分填充、直到全部。
+
+### 10.4 `canPush(resources)`
+
+同步查询，不挂起、不转移资源：返回当前目标能否**一次性**接受精确的完整资源列表。`resources` 可以是普通资源规格（不要求 owned）。
+
+### 10.5 `extract()`
 
 无参数提取该目标面此刻可提取的全部物品：
 
@@ -530,7 +546,9 @@ Bus 与 AE 网络不强行实现同一个存储接口。二者都支持精确 `p
 
 ```ts
 interface NetworkItems {
-  push(resources: OwnedResource | readonly OwnedResource[]): boolean;
+  push(resources: OwnedResource | readonly OwnedResource[]): true;
+  pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
+  canPush(resources: Resource | readonly Resource[]): boolean;
   extract(requests: Resource | readonly Resource[]): readonly OwnedResource[];
   read(): readonly Resource[];
   count(spec: string | Resource): number;
@@ -539,13 +557,21 @@ interface NetworkItems {
 
 ### 11.1 `network.items().push(resources)`
 
-把完整资源集合推送到指定 AE 网络：
+挂起并向指定 AE 网络精确推送完整资源集合，**每 tick 重试直到全部数量一次性被网络接受后返回 `true`**：
 
-- 全部进入网络返回 `true`；
-- 无法完整接收时不移动资源并返回 `false`；
+- 只在网络能完整接收时推送，不允许部分成功；
+- 网络离线、满仓或无法完整接收时持续挂起重试；
 - 不自动改送下单网络或其他控制器面。
 
-### 11.2 `network.items().extract(requests)`
+### 11.2 `network.items().pushTillFull(resources)`
+
+挂起并每 tick 向网络推送当前能接受的部分输入，直到整个资源列表全部进入网络后返回 `true`。与 `bus.items().pushTillFull` 语义一致，用于把产出逐步回流到大型网络。
+
+### 11.3 `network.items().canPush(resources)`
+
+同步查询，不挂起、不转移资源：返回该网络当前能否一次性接受精确的完整资源列表。`resources` 可以是普通资源规格。
+
+### 11.4 `network.items().extract(requests)`
 
 这是被动生产从 AE 网络取得输入所需的最小能力：
 
@@ -564,7 +590,7 @@ const ores = source.items().extract(item("minecraft:iron_ore", 1));
 if (ores.length === 0) return;
 ```
 
-### 11.3 `network.items().read()` 与 `network.items().count(spec)`
+### 11.5 `network.items().read()` 与 `network.items().count(spec)`
 
 两个同步只读操作，不改变网络、不转移资源，也不触发挂起。它们读取当前 tick 该 AE 网格可提供的物品：
 
@@ -656,10 +682,14 @@ registerPassive(function feedOre(ctx) {
     }
 
     const targetItems = line.input.items();
-    if (targetItems === null || !targetItems.push(input)) {
-      // 精确推送失败，input 仍属于 workflow，可以原样退回。
-      while (!source.items().push(input)) ctx.sleep(1);
+    if (targetItems === null) {
+      // 目标面消失：先把 input 退回源网络，下一轮再重新选择。
+      source.items().push(input);
+      continue;
     }
+
+    // push 挂起直到熔炉一次性接受全部输入。
+    targetItems.push(input);
 
     // 产线节奏完全由脚本决定。
     ctx.sleep(20);
@@ -684,15 +714,9 @@ registerPassive(function feedOre(ctx) {
 
 ## 15. 用户态等待与超时
 
-`push` 的 `false` 和 `extract` 的空数组就是第一阶段的全部运行结果。是否等待由脚本决定：
+`push` 与 `pushTillFull` 会挂起并每 tick 重试，直到完成才返回；`extract` 的空数组和 `canPush` 的 `false` 是需要脚本自行决定等待的运行结果。`extract` 没有内置等待，脚本可以用包装函数轮询：
 
 ```js
-function pushEventually(ctx, items, resources, interval) {
-  while (!items.push(resources)) {
-    ctx.sleep(interval);
-  }
-}
-
 function extractEventually(ctx, items, interval) {
   let result = [];
   while (result.length === 0) {
@@ -703,7 +727,18 @@ function extractEventually(ctx, items, interval) {
 }
 ```
 
-Bus 地址失效时这两个包装函数会一直等待。希望换地址的脚本应在循环中重新读取 `ctx.buses` 或 `network.buses` 并重新选择。框架不会保存筛选函数，也不会自动重新求值动作参数。
+需要非阻塞判断推送是否可行时，先查 `canPush`：
+
+```js
+function pushIfPossible(ctx, items, resources, interval) {
+  while (!items.canPush(resources)) {
+    ctx.sleep(interval);
+  }
+  items.push(resources); // 下一 tick 必然一次性成功
+}
+```
+
+Bus 地址失效时这些包装函数会一直等待。希望换地址的脚本应在循环中重新读取 `ctx.buses` 或 `network.buses` 并重新选择。框架不会保存筛选函数，也不会自动重新求值动作参数。`push`/`pushTillFull` 挂起期间脚本无法执行其他动作，需要超时或改换目标的产线应当用 `canPush` + `ctx.sleep` 组合自行控制节奏。
 
 ### 15.1 deadline
 
@@ -738,10 +773,11 @@ function clearBeforeStart(ctx, output, sink, timeoutTicks) {
     const leftovers = output.extract();
     if (leftovers.length === 0) return true;
 
-    while (!sink.push(leftovers)) {
+    while (!sink.canPush(leftovers)) {
       if (ctx.tick >= deadline) return false;
       ctx.sleep(1);
     }
+    sink.push(leftovers);
 
     // 即使机器持续产生物品，也让服务器 tick 和 deadline 前进。
     ctx.yield();
@@ -785,16 +821,14 @@ function smelt(ctx) {
     ctx.fail("Furnace bus disappeared");
   }
 
-  // 精确推送：全部成功或完全不动。
-  if (!input.push(ctx.inputs)) {
-    ctx.fail("Furnace cannot accept input");
-  }
+  // 精确推送：挂起直到熔炉能一次性接收全部输入。
+  input.push(ctx.inputs);
 
   // 输出面有什么就取出什么，不要求框架追踪批次。
   const products = extractEventually(ctx, output, 5);
 
-  // 下单网络是 north；执行 Bus 来自 south 子网。
-  pushEventually(ctx, ctx.orderNetwork.items(), products, 1);
+  // 下单网络是 north；执行 Bus 来自 south 子网。push 会挂起重试直到全部进入网络。
+  ctx.orderNetwork.items().push(products);
 }
 
 registerPatterns({
@@ -831,7 +865,7 @@ registerControllerHandler({
 - `Resource.slice`、`Resource.split`；
 - Java 侧 Machine、机器池、租约或批次归属；
 - `getMachine(s)`、原生 Bus filter callback 或查询 DSL；
-- 自动等待、自动换 Bus、自动换网络或参数重新求值；
+- 自动换 Bus、自动换网络或参数重新求值（`push`/`pushTillFull` 只对选定地址等待重试，不重新选择目标）；
 - 独立并发的 `setTimeout(callback)` 定时任务；
 - Bus UUID、移动后保持身份或预期 block ID 校验；
 - 流体端点、任意世界操作；

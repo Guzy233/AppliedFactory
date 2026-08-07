@@ -47,6 +47,7 @@ public final class FactoryActionExecutor {
     public FactoryActionResult perform(FactoryJob job, FactoryScriptAction action) {
         return switch (action.type()) {
             case BUS_PUSH -> FactoryActionResult.pushed(pushToBus(job, action));
+            case BUS_PUSH_TILL_FULL -> pushTillFullToBus(job, action);
             case BUS_EXTRACT -> FactoryActionResult.extracted(extractFromBus(job, action));
             case BUS_DROP -> FactoryActionResult.booleanResult(dropFromBus(job, action));
             case BUS_USE -> FactoryActionResult.booleanResult(useBus(action));
@@ -61,6 +62,10 @@ public final class FactoryActionExecutor {
                         action.resources(),
                         job::canConsumeOwned,
                         job::consumeOwned));
+            }
+            case NETWORK_PUSH_TILL_FULL -> {
+                job.setRecoverySideIfAbsent(action.networkSide());
+                yield pushTillFullToNetwork(job, action);
             }
             case NETWORK_EXTRACT -> {
                 job.setRecoverySideIfAbsent(action.networkSide());
@@ -277,6 +282,49 @@ public final class FactoryActionExecutor {
         return true;
     }
 
+    /**
+     * One attempt of a blocking till-full bus push: inserts as much as the target
+     * accepts, moves that from the cache to the workflow ledger, and reports the
+     * remaining resources. Nothing is inserted when the target is unavailable; the
+     * scheduler retries the remainder on the next tick.
+     */
+    private FactoryActionResult pushTillFullToBus(FactoryJob job, FactoryScriptAction action) {
+        var resources = action.resources();
+        if (!job.canConsumeOwned(resources)) {
+            throw new IllegalStateException("Workflow does not own bus push resources");
+        }
+        var bus = busResolver.apply(action.bus()).orElse(null);
+        var machine = bus == null ? null : bus.machine().orElse(null);
+        if (machine == null) {
+            return FactoryActionResult.remaining(resources);
+        }
+        var stacks = toItemStacks(resources);
+        if (stacks == null) {
+            return FactoryActionResult.remaining(resources);
+        }
+        var amounts = new LinkedHashMap<AEKey, Long>();
+        for (var stack : stacks) {
+            var remainder = machine.insert(stack, false);
+            var insertedCount = stack.getCount() - remainder.getCount();
+            if (insertedCount > 0) {
+                amounts.merge(AEItemKey.of(stack), (long) insertedCount, Math::addExact);
+            }
+        }
+        var inserted = fromAmounts(amounts);
+        if (!inserted.isEmpty() && !cache.removeAll(inserted)) {
+            var rejected = machine.insertAll(toItemStacks(inserted));
+            if (!rejected.isEmpty()) {
+                machine.dropItems(rejected);
+            }
+            return FactoryActionResult.remaining(resources);
+        }
+        if (!inserted.isEmpty()) {
+            job.consumeOwned(inserted);
+            changed.run();
+        }
+        return FactoryActionResult.remaining(subtract(resources, inserted));
+    }
+
     private com.fulent.appliedfactory.factory.FactoryMachineAccess resolvedMachine(
             FactoryBusAddress address) {
         var bus = busResolver.apply(address).orElse(null);
@@ -355,6 +403,42 @@ public final class FactoryActionExecutor {
         consume.accept(resources);
         changed.run();
         return true;
+    }
+
+    /**
+     * One attempt of a blocking till-full network push: inserts as much as the
+     * network accepts and reports the remaining resources. The scheduler retries
+     * the remainder on the next tick.
+     */
+    private FactoryActionResult pushTillFullToNetwork(FactoryJob job, FactoryScriptAction action) {
+        var resources = action.resources();
+        if (!job.canConsumeOwned(resources)) {
+            throw new IllegalStateException("Workflow does not own network push resources");
+        }
+        var endpoint = networkResolver.resolve(action.networkSide()).orElse(null);
+        if (endpoint == null) {
+            return FactoryActionResult.remaining(resources);
+        }
+        var inserted = new ArrayList<FactoryResource>();
+        for (var resource : resources) {
+            var amount = endpoint.storage().insert(
+                    resource.key(), resource.amount(), Actionable.MODULATE, endpoint.source());
+            if (amount > 0) {
+                inserted.add(new FactoryResource(resource.key(), amount));
+            }
+        }
+        if (!inserted.isEmpty() && !cache.removeAll(inserted)) {
+            for (var resource : inserted) {
+                endpoint.storage().extract(
+                        resource.key(), resource.amount(), Actionable.MODULATE, endpoint.source());
+            }
+            return FactoryActionResult.remaining(resources);
+        }
+        if (!inserted.isEmpty()) {
+            job.consumeOwned(inserted);
+            changed.run();
+        }
+        return FactoryActionResult.remaining(subtract(resources, inserted));
     }
 
     private boolean recoverPartialNetworkPush(

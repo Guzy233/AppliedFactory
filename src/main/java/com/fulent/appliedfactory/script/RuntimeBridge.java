@@ -26,6 +26,7 @@ import com.fulent.appliedfactory.part.FactoryBusPart;
 
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
+import appeng.api.config.Actionable;
 import appeng.api.crafting.PatternDetailsHelper;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
@@ -502,6 +503,26 @@ final class RuntimeBridge {
         }
 
         @JsMethod
+        public Object pushTillFull(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "bus.items().pushTillFull(resources)");
+            return suspend(cx, FactoryScriptAction.busPushTillFull(
+                    requireBus(self), parseOwned(args[0])));
+        }
+
+        @JsMethod
+        public Object canPush(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "bus.items().canPush(resources)");
+            var resources = parseResourceSpecs(args[0], "bus push resources");
+            var bus = resolveBus(requireBus(self)).orElse(null);
+            var machine = bus == null ? null : bus.machine().orElse(null);
+            if (machine == null) {
+                return false;
+            }
+            var stacks = toItemStacks(resources);
+            return stacks != null && machine.canInsertAll(stacks);
+        }
+
+        @JsMethod
         public Object extract(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.items().extract()");
             return suspend(cx, FactoryScriptAction.busExtract(requireBus(self)));
@@ -530,6 +551,26 @@ final class RuntimeBridge {
             requireArity(args, 1, 1, "network.items().push(resources)");
             return suspend(cx, FactoryScriptAction.networkPush(
                     requireNetwork(self), parseOwned(args[0])));
+        }
+
+        @JsMethod
+        public Object pushTillFull(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "network.items().pushTillFull(resources)");
+            return suspend(cx, FactoryScriptAction.networkPushTillFull(
+                    requireNetwork(self), parseOwned(args[0])));
+        }
+
+        @JsMethod
+        public Object canPush(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "network.items().canPush(resources)");
+            var resources = parseResourceSpecs(args[0], "network push resources");
+            var endpoint = context.networkStorage(requireNetwork(self)).orElse(null);
+            if (endpoint == null) {
+                return false;
+            }
+            return resources.stream().allMatch(resource -> endpoint.storage().insert(
+                    resource.key(), resource.amount(), Actionable.SIMULATE, endpoint.source())
+                    == resource.amount());
         }
 
         @JsMethod
@@ -1115,6 +1156,8 @@ final class RuntimeBridge {
             case BOOLEAN -> result.success();
             case RESOURCES -> resourceArray(
                     Context.getCurrentContext(), result.resources(), context.workflowId());
+            case REMAINING -> throw new IllegalStateException(
+                    "REMAINING results are scheduler-internal and never reach a script");
             case VOID -> Undefined.instance;
         };
     }
@@ -1141,6 +1184,23 @@ final class RuntimeBridge {
         return resources.stream()
                 .map(resource -> new GenericStack(resource.key(), resource.amount()))
                 .toList();
+    }
+
+    /** Detached item stacks for a resource list, or null when any key is not an item. */
+    private static List<ItemStack> toItemStacks(List<FactoryResource> resources) {
+        var result = new ArrayList<ItemStack>();
+        for (var resource : resources) {
+            if (!(resource.key() instanceof AEItemKey itemKey)) {
+                return null;
+            }
+            var remaining = resource.amount();
+            while (remaining > 0) {
+                var amount = (int) Math.min(remaining, itemKey.getMaxStackSize());
+                result.add(itemKey.toStack(amount));
+                remaining -= amount;
+            }
+        }
+        return List.copyOf(result);
     }
 
     private static boolean canSubtract(

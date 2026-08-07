@@ -37,13 +37,16 @@ The first-stage item I/O API is deliberately small:
 ```js
 const items = bus.items();
 
-const pushed = items.push(ctx.inputs); // boolean, exact all-or-nothing
-const pulled = items.extract();        // everything currently extractable
+items.push(ctx.inputs);        // suspends, retries each tick, exact all-or-nothing
+items.pushTillFull(ctx.inputs); // suspends, fills whatever fits each tick until done
+const ok = items.canPush(ctx.inputs); // synchronous one-shot capacity query
+const pulled = items.extract();       // everything currently extractable
 ```
 
-There are no partial-transfer result objects or automatic retries. A script
-that wants to wait checks `false` or an empty array and calls
-`ctx.sleep(ticks)` itself.
+`push` and `pushTillFull` suspend the workflow and retry once per server tick
+until they complete, like an AE crafting order waiting on the input. There are
+no partial-transfer result objects; `canPush` is the non-blocking way to ask
+whether an exact full push can happen right now.
 
 Ordering and execution networks are separate. Registrations state which
 controller side advertises the pattern, while handlers explicitly select any

@@ -11,8 +11,8 @@ public record FactoryActionResult(Kind kind, boolean success, List<FactoryResour
         if (kind != Kind.BOOLEAN && success) {
             throw new IllegalArgumentException("Only BOOLEAN results carry a success flag");
         }
-        if (kind != Kind.RESOURCES && !resources.isEmpty()) {
-            throw new IllegalArgumentException("Only RESOURCES results carry resources");
+        if (kind != Kind.RESOURCES && kind != Kind.REMAINING && !resources.isEmpty()) {
+            throw new IllegalArgumentException("Only RESOURCES/REMAINING results carry resources");
         }
     }
 
@@ -28,6 +28,16 @@ public record FactoryActionResult(Kind kind, boolean success, List<FactoryResour
         return new FactoryActionResult(Kind.RESOURCES, false, resources);
     }
 
+    /**
+     * Result of one attempt of a blocking till-full push: the resources that
+     * could not be transferred yet. Empty means every requested resource is now
+     * inside the target and the script may resume. Handled by the scheduler, never
+     * passed back into a script.
+     */
+    public static FactoryActionResult remaining(List<FactoryResource> resources) {
+        return new FactoryActionResult(Kind.REMAINING, false, resources);
+    }
+
     public static FactoryActionResult slept() {
         return new FactoryActionResult(Kind.VOID, false, List.of());
     }
@@ -35,6 +45,7 @@ public record FactoryActionResult(Kind kind, boolean success, List<FactoryResour
     public enum Kind {
         BOOLEAN,
         RESOURCES,
+        REMAINING,
         VOID
     }
 }

@@ -159,6 +159,16 @@ public abstract class FactoryJob {
         actionStartedTick = startedTick;
     }
 
+    /**
+     * Replaces the pending action without touching the continuation. Used by the
+     * scheduler when a blocking till-full push transferred part of its input: the
+     * script stays blocked at the call site and only the remaining resources are
+     * retried.
+     */
+    public void setPendingAction(FactoryScriptAction action) {
+        pendingAction = Objects.requireNonNull(action, "action");
+    }
+
     // ---- Persistence -------------------------------------------------------
 
     /**

@@ -89,6 +89,12 @@ public record FactoryScriptAction(
         return new FactoryScriptAction(Type.BUS_PUSH, bus, null, resources, 0, 0, null);
     }
 
+    public static FactoryScriptAction busPushTillFull(
+            FactoryBusAddress bus, List<FactoryResource> resources) {
+        return new FactoryScriptAction(
+                Type.BUS_PUSH_TILL_FULL, bus, null, resources, 0, 0, null);
+    }
+
     public static FactoryScriptAction busExtract(FactoryBusAddress bus) {
         return new FactoryScriptAction(Type.BUS_EXTRACT, bus, null, List.of(), 0, 0, null);
     }
@@ -126,6 +132,12 @@ public record FactoryScriptAction(
         return new FactoryScriptAction(Type.NETWORK_PUSH, null, side, resources, 0, 0, null);
     }
 
+    public static FactoryScriptAction networkPushTillFull(
+            Direction side, List<FactoryResource> resources) {
+        return new FactoryScriptAction(
+                Type.NETWORK_PUSH_TILL_FULL, null, side, resources, 0, 0, null);
+    }
+
     public static FactoryScriptAction networkExtract(
             Direction side, List<FactoryResource> resources) {
         return new FactoryScriptAction(Type.NETWORK_EXTRACT, null, side, resources, 0, 0, null);
@@ -138,6 +150,17 @@ public record FactoryScriptAction(
 
     public static FactoryScriptAction sleep(int ticks) {
         return new FactoryScriptAction(Type.SLEEP, null, null, List.of(), ticks, 0, null);
+    }
+
+    /**
+     * Returns a copy of this action carrying a reduced resource list. Used by the
+     * scheduler when a blocking till-full push transfers part of its input each
+     * tick: the same continuation stays blocked at the call site while the
+     * remaining resources are retried.
+     */
+    public FactoryScriptAction withResources(List<FactoryResource> remaining) {
+        return new FactoryScriptAction(
+                type, bus, networkSide, remaining, sleepTicks, redstoneLevel, name);
     }
 
     public CompoundTag save(HolderLookup.Provider registries) {
@@ -238,27 +261,32 @@ public record FactoryScriptAction(
     }
 
     public enum Type {
-        BUS_PUSH(true, false, true),
-        BUS_EXTRACT(true, false, false),
-        BUS_DROP(true, false, true),
-        BUS_USE(true, false, false),
-        BUS_PLACE(true, false, true),
-        BUS_BREAK(true, false, false),
-        BUS_BREAK_WITH(true, false, true),
-        BUS_REDSTONE(true, false, false),
-        NETWORK_PUSH(false, true, true),
-        NETWORK_EXTRACT(false, true, true),
-        RENAME_OWNED(false, false, true),
-        SLEEP(false, false, false);
+        BUS_PUSH(true, false, true, true),
+        BUS_PUSH_TILL_FULL(true, false, true, true),
+        BUS_EXTRACT(true, false, false, false),
+        BUS_DROP(true, false, true, false),
+        BUS_USE(true, false, false, false),
+        BUS_PLACE(true, false, true, false),
+        BUS_BREAK(true, false, false, false),
+        BUS_BREAK_WITH(true, false, true, false),
+        BUS_REDSTONE(true, false, false, false),
+        NETWORK_PUSH(false, true, true, true),
+        NETWORK_PUSH_TILL_FULL(false, true, true, true),
+        NETWORK_EXTRACT(false, true, true, false),
+        RENAME_OWNED(false, false, true, false),
+        SLEEP(false, false, false, false);
 
         private final boolean busAction;
         private final boolean networkAction;
         private final boolean requiresResources;
+        private final boolean blocking;
 
-        Type(boolean busAction, boolean networkAction, boolean requiresResources) {
+        Type(boolean busAction, boolean networkAction, boolean requiresResources,
+                boolean blocking) {
             this.busAction = busAction;
             this.networkAction = networkAction;
             this.requiresResources = requiresResources;
+            this.blocking = blocking;
         }
 
         public boolean isBusAction() {
@@ -271,6 +299,16 @@ public record FactoryScriptAction(
 
         public boolean requiresResources() {
             return requiresResources;
+        }
+
+        /**
+         * Blocking actions keep their pending action across failed attempts: the
+         * scheduler retries them on the next server tick instead of resuming the
+         * script, and only resumes once the operation succeeds (or, for till-full
+         * pushes, once the remaining resource list is empty).
+         */
+        public boolean isBlocking() {
+            return blocking;
         }
     }
 }

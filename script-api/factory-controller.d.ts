@@ -64,7 +64,18 @@ interface BusState {
 
 interface BusItems {
     read(): readonly Resource[];
-    push(resources: OwnedResource | readonly OwnedResource[]): boolean;
+    /**
+     * Blocks until the target accepts the exact full resource list in one shot,
+     * then returns `true`. Retried every server tick; never transfers partially.
+     */
+    push(resources: OwnedResource | readonly OwnedResource[]): true;
+    /**
+     * Blocks, transferring as much as the target accepts each tick, until the
+     * entire resource list is inside the target; returns `true` when done.
+     */
+    pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
+    /** Queries whether the target can accept the exact full list right now. */
+    canPush(resources: Resource | readonly Resource[]): boolean;
     extract(): readonly OwnedResource[];
 }
 
@@ -97,7 +108,18 @@ interface Bus {
 }
 
 interface NetworkItems {
-    push(resources: OwnedResource | readonly OwnedResource[]): boolean;
+    /**
+     * Blocks until the network accepts the exact full resource list, then returns
+     * `true`. Retried every server tick; never transfers partially.
+     */
+    push(resources: OwnedResource | readonly OwnedResource[]): true;
+    /**
+     * Blocks, transferring as much as the network accepts each tick, until the
+     * entire resource list is inside the network; returns `true` when done.
+     */
+    pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
+    /** Queries whether the network can accept the exact full list right now. */
+    canPush(resources: Resource | readonly Resource[]): boolean;
     extract(requests: Resource | readonly Resource[]): readonly OwnedResource[];
     /** Snapshot of everything this network can currently supply; read-only resources. */
     read(): readonly Resource[];

@@ -511,7 +511,28 @@ public final class FactoryProgram {
             return;
         }
         try {
-            resume(job, host.performAction(job, action));
+            var result = host.performAction(job, action);
+            if (action.type().isBlocking()) {
+                // Blocking actions only resume the script on completion; failures and
+                // partially-transferred till-full input are retried on the next tick.
+                switch (result.kind()) {
+                    case REMAINING -> {
+                        if (result.resources().isEmpty()) {
+                            resume(job, FactoryActionResult.booleanResult(true));
+                        } else {
+                            job.setPendingAction(action.withResources(result.resources()));
+                        }
+                    }
+                    case BOOLEAN -> {
+                        if (result.success()) {
+                            resume(job, result);
+                        }
+                    }
+                    default -> resume(job, result);
+                }
+                return;
+            }
+            resume(job, result);
         } catch (RuntimeException exception) {
             AppliedFactory.LOGGER.error("Factory action failed", exception);
             finishJob(job, exception.getMessage());
