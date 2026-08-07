@@ -4,7 +4,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import com.fulent.appliedfactory.script.FactoryActionResult;
 import com.fulent.appliedfactory.script.FactoryScriptAction;
@@ -48,8 +50,11 @@ public final class FactoryActionExecutor {
             case BUS_REDSTONE -> FactoryActionResult.booleanResult(setBusRedstone(action));
             case NETWORK_PUSH -> {
                 job.setRecoverySideIfAbsent(action.networkSide());
-                yield FactoryActionResult.pushed(
-                        pushToNetwork(job, action.networkSide(), action.resources()));
+                yield FactoryActionResult.pushed(pushToNetwork(
+                        action.networkSide(),
+                        action.resources(),
+                        job::canConsumeOwned,
+                        job::consumeOwned));
             }
             case NETWORK_EXTRACT -> {
                 job.setRecoverySideIfAbsent(action.networkSide());
@@ -151,9 +156,13 @@ public final class FactoryActionExecutor {
         return true;
     }
 
-    /** Recovery is exact too: failure leaves the workflow's cache ownership intact. */
-    public boolean returnOwned(FactoryJob job, Direction side) {
-        return pushToNetwork(job, side, job.owned());
+    /**
+     * Returns owned resources to a network side. Used for job recovery: the owned list is the
+     * exact set being returned, so no ownership ledger is consulted.
+     */
+    public boolean returnOwned(List<FactoryResource> owned, Direction side) {
+        return pushToNetwork(side, owned, resources -> true, resources -> {
+        });
     }
 
     private boolean pushToBus(FactoryJob job, FactoryScriptAction action) {
@@ -235,8 +244,11 @@ public final class FactoryActionExecutor {
     }
 
     private boolean pushToNetwork(
-            FactoryJob job, Direction side, List<FactoryResource> resources) {
-        if (!job.canConsumeOwned(resources)) {
+            Direction side,
+            List<FactoryResource> resources,
+            Predicate<List<FactoryResource>> canConsume,
+            Consumer<List<FactoryResource>> consume) {
+        if (!canConsume.test(resources)) {
             throw new IllegalStateException("Workflow does not own network push resources");
         }
         if (resources.isEmpty()) {
@@ -257,19 +269,19 @@ public final class FactoryActionExecutor {
                 inserted.add(new FactoryResource(resource.key(), amount));
             }
             if (amount != resource.amount()) {
-                return recoverPartialNetworkPush(job, target, resources, inserted);
+                return recoverPartialNetworkPush(target, resources, inserted, consume);
             }
         }
-        job.consumeOwned(resources);
+        consume.accept(resources);
         changed.run();
         return true;
     }
 
     private boolean recoverPartialNetworkPush(
-            FactoryJob job,
             NetworkEndpoint target,
             List<FactoryResource> requested,
-            List<FactoryResource> inserted) {
+            List<FactoryResource> inserted,
+            Consumer<List<FactoryResource>> consume) {
         var recovered = new ArrayList<FactoryResource>();
         for (var resource : inserted) {
             var amount = target.storage.extract(
@@ -284,7 +296,7 @@ public final class FactoryActionExecutor {
         }
         var lost = subtract(requested, recovered);
         if (!lost.isEmpty()) {
-            job.consumeOwned(lost);
+            consume.accept(lost);
             throw new IllegalStateException("AE storage violated insertion simulation");
         }
         return false;

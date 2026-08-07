@@ -18,18 +18,15 @@ import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.factory.FactoryActionExecutor;
 import com.fulent.appliedfactory.factory.FactoryCellCache;
 import com.fulent.appliedfactory.factory.FactoryJob;
+import com.fulent.appliedfactory.factory.FactoryProgram;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.part.FactoryBusPart;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgram;
-import com.fulent.appliedfactory.script.ControllerProgramCompiler;
 import com.fulent.appliedfactory.script.FactoryActionResult;
 import com.fulent.appliedfactory.script.FactoryScriptAction;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
-import com.fulent.appliedfactory.script.ScriptExecutionContext;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
-import com.fulent.appliedfactory.script.ScriptRuntime;
-import com.fulent.appliedfactory.script.ScriptStep;
 
 import appeng.api.config.Actionable;
 import appeng.api.config.PowerMultiplier;
@@ -78,15 +75,13 @@ import net.neoforged.neoforge.items.ItemStackHandler;
 /** Six independent AE endpoints coordinated by one bus-centric script runtime. */
 public final class FactoryControllerBlockEntity extends BlockEntity
         implements IGridNodeListener<FactoryControllerBlockEntity>,
-        IInWorldGridNodeHost, IPowerChannelState {
+        IInWorldGridNodeHost, IPowerChannelState, FactoryProgram.Host {
     public static final int PATTERN_SLOTS = 9;
     public static final int CACHE_SLOTS = 3;
-    private static final int MAX_FACTORY_JOBS = 64;
     private static final double MAX_POWER_TRANSFER_PER_NETWORK = 1_024.0D;
     private static final double POWER_EPSILON = 0.0001D;
     private static final String PATTERNS_NBT_KEY = "Patterns";
     private static final String CACHE_NBT_KEY = "FactoryCache";
-    private static final String JOBS_NBT_KEY = "FactoryJobs";
     private static final String ERROR_SUBSCRIBERS_NBT_KEY = "ErrorSubscribers";
     private static final String ERROR_SUBSCRIBER_ID_NBT_KEY = "Id";
     private static final ResourceLocation AE2_PROCESSING_PATTERN_ID =
@@ -111,17 +106,18 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             new EnumMap<>(Direction.class);
     private final Map<Direction, IManagedGridNode> networkNodes =
             new EnumMap<>(Direction.class);
-    private final Map<String, RuntimeState> runtimes = new LinkedHashMap<>();
-    private final List<FactoryJob> jobs = new ArrayList<>();
-    private final Set<UUID> reportedRecoveryFailures = new LinkedHashSet<>();
     private final Set<UUID> errorSubscribers = new LinkedHashSet<>();
     private final Set<String> reportedScriptFailures = new LinkedHashSet<>();
 
     private List<OfferedPattern> offeredPatterns = List.of();
-    private CompiledControllerProgram compiledProgram = CompiledControllerProgram.EMPTY;
     private String controllerProgram = ControllerProgram.DEFAULT_SOURCE;
     private boolean patternsDirty = true;
-    private boolean programDirty = true;
+    /**
+     * The compiled program revision for {@link #controllerProgram}, owning all suspended jobs.
+     * Null while the current source fails to compile; the source itself is still kept so the
+     * player can fix and re-save it.
+     */
+    private FactoryProgram program;
     /**
      * Set while building a client update tag. Jobs (and their continuations) are never synced to
      * clients, so we skip serializing them there — otherwise every block update would pay the full
@@ -185,8 +181,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         controllerProgram = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
                 ? tag.getString(ControllerProgram.NBT_KEY)
                 : ControllerProgram.DEFAULT_SOURCE;
-        jobs.clear();
-        reportedRecoveryFailures.clear();
         errorSubscribers.clear();
         reportedScriptFailures.clear();
         var savedSubscribers = tag.getList(ERROR_SUBSCRIBERS_NBT_KEY, Tag.TAG_COMPOUND);
@@ -196,13 +190,12 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 errorSubscribers.add(subscriber.getUUID(ERROR_SUBSCRIBER_ID_NBT_KEY));
             }
         }
-        var savedJobs = tag.getList(JOBS_NBT_KEY, Tag.TAG_COMPOUND);
-        for (int index = 0; index < savedJobs.size(); index++) {
-            FactoryJob.load(savedJobs.getCompound(index), registries).ifPresent(jobs::add);
+        program = createProgram(controllerProgram);
+        if (program != null) {
+            program.loadJobs(tag, registries);
         }
         networkNodes.values().forEach(node -> node.loadFromNBT(tag));
-        runtimes.clear();
-        invalidateProgramAndPatterns();
+        invalidatePatterns();
     }
 
     @Override
@@ -211,12 +204,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         tag.put(PATTERNS_NBT_KEY, patternInventory.serializeNBT(registries));
         tag.put(CACHE_NBT_KEY, cache.inventory().serializeNBT(registries));
         tag.putString(ControllerProgram.NBT_KEY, controllerProgram);
-        if (!suppressJobPersistence) {
-            var savedJobs = new ListTag();
-            for (var job : jobs) {
-                savedJobs.add(job.save(registries));
-            }
-            tag.put(JOBS_NBT_KEY, savedJobs);
+        if (!suppressJobPersistence && program != null) {
+            program.saveJobs(tag, registries);
         }
         var savedSubscribers = new ListTag();
         for (var subscriber : errorSubscribers) {
@@ -233,9 +222,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     public CompoundTag getUpdateTag(HolderLookup.Provider registries) {
         suppressJobPersistence = true;
         try {
-            var tag = saveWithoutMetadata(registries);
-            tag.remove(JOBS_NBT_KEY);
-            return tag;
+            return saveWithoutMetadata(registries);
         } finally {
             suppressJobPersistence = false;
         }
@@ -255,6 +242,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     public void onStateChanged(
             FactoryControllerBlockEntity owner, IGridNode node, State state) {
         invalidatePatterns();
+        // Grid state changed: re-run the initializer on the next step even if the watched
+        // bus set looks unchanged (e.g. a grid identity change).
+        if (program != null) {
+            program.markEnvironmentChanged();
+        }
     }
 
     @Override
@@ -287,7 +279,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     public boolean isCacheLocked() {
-        return jobs.stream().anyMatch(job -> !job.owned().isEmpty());
+        return program != null && program.hasLockedCache();
     }
 
     public String getControllerProgram() {
@@ -295,8 +287,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     public CompiledControllerProgram getCompiledProgram() {
-        ensureCurrentProgramLoaded();
-        return compiledProgram;
+        return program == null ? CompiledControllerProgram.EMPTY : program.compiled();
     }
 
     public boolean isErrorSubscribed(UUID playerId) {
@@ -310,93 +301,31 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     /**
-     * Compiles before committing so an invalid edit cannot replace the currently running program.
+     * Compiles before committing so an invalid edit cannot replace the currently running
+     * program. A successful replacement cancels every job of the old revision (their
+     * continuations are bound to the old Rhino scope); their owned resources move to the new
+     * program's recovery queue and are returned to the network as soon as it accepts them.
      */
-    public ProgramLoadResult updateControllerProgram(String source) {
-        var runtime = ControllerProgramCompiler.createRuntime();
-        var result = runtime.loadProgram(source);
+    public ProgramLoadResult<FactoryProgram> updateControllerProgram(String source) {
+        var result = FactoryProgram.replace(program, source, this);
         if (!result.successful()) {
             return result;
         }
-        // A continuation captures its original script globals and local handles. Keeping a
-        // processing job alive after replacing its program means it can keep retrying an
-        // obsolete action while holding resources in the private cache. Mark every live job
-        // for normal recovery instead; tickFactoryJobs() returns its exact owned resources to
-        // the job's recorded order/recovery network before removing it.
-        //
-        // For passive jobs of the *current* program, finishJob() intentionally doesn't remove
-        // them (they restart automatically). But if we're reloading the exact same source,
-        // those finished passive jobs would never restart. Remove them explicitly so
-        // startMissingPassives() can launch fresh ones.
-        for (var job : jobs) {
-            if (!job.finished()) {
-                job.markFinished();
-            }
-        }
-        jobs.removeIf(job -> job.kind() == FactoryJob.Kind.PASSIVE
-                && job.programSource().equals(controllerProgram)
-                && job.finished());
         controllerProgram = source;
-        runtimes.clear();
-        runtimes.put(source, new RuntimeState(runtime, result.program(), true));
+        program = result.program();
         reportedScriptFailures.clear();
-        invalidateProgramAndPatterns();
+        invalidatePatterns();
         markChangedAndSync();
         return result;
     }
 
-    private void ensureCurrentProgramLoaded() {
-        if (!programDirty) {
-            return;
+    private FactoryProgram createProgram(String source) {
+        var result = FactoryProgram.load(source, this);
+        if (!result.successful()) {
+            reportScriptFailure("program load", result.errorMessage());
+            return null;
         }
-        var state = runtimeFor(controllerProgram);
-        compiledProgram = state == null
-                ? CompiledControllerProgram.EMPTY
-                : state.program;
-        programDirty = false;
-    }
-
-    private RuntimeState runtimeFor(String source) {
-        var existing = runtimes.get(source);
-        if (existing != null) {
-            return existing.valid ? existing : null;
-        }
-        var runtime = ControllerProgramCompiler.createRuntime();
-        var loaded = runtime.loadProgram(source);
-        var state = loaded.successful()
-                ? new RuntimeState(runtime, loaded.program(), true)
-                : new RuntimeState(runtime, CompiledControllerProgram.EMPTY, false);
-        runtimes.put(source, state);
-        if (!loaded.successful()) {
-            reportScriptFailure("program load", loaded.errorMessage());
-        }
-        return state.valid ? state : null;
-    }
-
-    private boolean ensureInitialized(RuntimeState state) {
-        if (level == null || !state.valid) {
-            return false;
-        }
-        var fingerprint = topologyFingerprint(state.program.initializerNetworks());
-        if (state.initialized && state.lastTopology == fingerprint) {
-            return true;
-        }
-        if (state.attempted && state.lastAttemptedTopology == fingerprint) {
-            return false;
-        }
-        state.attempted = true;
-        state.lastAttemptedTopology = fingerprint;
-        var step = state.runtime.runInitializer(createContext(
-                new UUID(0, 0), null, List.of(), List.of(), List.of(),
-                state.program.initializerNetworks()));
-        if (step instanceof ScriptStep.Completed) {
-            state.initialized = true;
-            state.lastTopology = fingerprint;
-            return true;
-        }
-        state.initialized = false;
-        logScriptFailure("initializer", step);
-        return false;
+        return result.program();
     }
 
     private List<IPatternDetails> availablePatterns(Direction side) {
@@ -411,22 +340,22 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         if (!patternsDirty) {
             return;
         }
-        ensureCurrentProgramLoaded();
+        var compiled = program == null ? CompiledControllerProgram.EMPTY : program.compiled();
         var offers = new ArrayList<OfferedPattern>();
-        if (level != null && compiledProgram.hasControllerHandler()) {
+        if (level != null && compiled.hasControllerHandler()) {
             for (int slot = 0; slot < patternInventory.getSlots(); slot++) {
                 var details = PatternDetailsHelper.decodePattern(
                         patternInventory.getStackInSlot(slot), level);
                 if (details != null) {
                     offers.add(new OfferedPattern(
                             details,
-                            compiledProgram.controllerOrderNetwork(),
+                            compiled.controllerOrderNetwork(),
                             ScriptHandlerRef.controller()));
                 }
             }
         }
         if (level != null) {
-            for (var pattern : compiledProgram.scriptPatterns()) {
+            for (var pattern : compiled.scriptPatterns()) {
                 var details = PatternDetailsHelper.decodePattern(pattern.encodedPattern(), level);
                 if (details != null) {
                     offers.add(new OfferedPattern(
@@ -446,17 +375,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         networkNodes.values().forEach(ICraftingProvider::requestUpdate);
     }
 
-    private void invalidateProgramAndPatterns() {
-        programDirty = true;
-        compiledProgram = CompiledControllerProgram.EMPTY;
-        invalidatePatterns();
-    }
-
     private boolean pushPattern(
             Direction networkSide,
             IPatternDetails patternDetails,
             KeyCounter[] inputHolder) {
-        if (level == null || activeProcessingJobs() >= MAX_FACTORY_JOBS) {
+        if (level == null || program == null || !program.canAcceptJobs()) {
             return false;
         }
         rebuildPatternsIfNeeded();
@@ -482,34 +405,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             return false;
         }
 
-        var runtime = runtimeFor(controllerProgram);
-        if (runtime == null || !ensureInitialized(runtime)) {
+        // The program owns the job from here on: inputs are committed to the cache. On any
+        // failure the cache rollback below restores them so the network can retry.
+        if (!program.startJob(offered.handler, networkSide, inputs, outputs)) {
             requireCacheRollback(inputs);
             return false;
-        }
-        var workflowId = UUID.randomUUID();
-        var context = createContext(
-                workflowId, networkSide, inputs, outputs, inputs,
-                EnumSet.allOf(Direction.class));
-        var step = runtime.runtime.startProcessing(offered.handler, context);
-        if (step instanceof ScriptStep.Failed) {
-            requireCacheRollback(inputs);
-            logScriptFailure("processing start", step);
-            return false;
-        }
-        if (step instanceof ScriptStep.Suspended suspended) {
-            jobs.add(FactoryJob.processing(
-                    workflowId,
-                    networkSide,
-                    controllerProgram,
-                    inputs,
-                    outputs,
-                    suspended.continuation(),
-                    suspended.action(),
-                    level.getGameTime()));
-        } else {
-            jobs.add(FactoryJob.completedProcessing(
-                    workflowId, networkSide, controllerProgram, inputs, outputs));
         }
         setChanged();
         return true;
@@ -521,168 +421,27 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
     }
 
-    private int activeProcessingJobs() {
-        return (int) jobs.stream()
-                .filter(job -> job.kind() == FactoryJob.Kind.PROCESSING && !job.finished())
-                .count();
-    }
-
     private boolean isBusy(Direction side) {
-        var state = runtimeFor(controllerProgram);
-        return state == null
-                || !ensureInitialized(state)
+        return program == null
+                || !program.canAcceptJobs()
                 || !cache.hasStorageCell()
-                || activeProcessingJobs() >= MAX_FACTORY_JOBS
                 || availablePatterns(side).isEmpty();
     }
 
-    private void tickFactoryJobs() {
-        if (level == null || level.isClientSide) {
-            return;
-        }
-        ensureCurrentProgramLoaded();
-        var currentRuntime = runtimeFor(controllerProgram);
-        if (currentRuntime != null && ensureInitialized(currentRuntime)) {
-            startMissingPassives(currentRuntime);
-        }
+    // ---- FactoryProgram.Host -------------------------------------------------
 
-        var now = level.getGameTime();
-        for (var job : List.copyOf(jobs)) {
-            if (job.finished()) {
-                try {
-                    finishJob(job);
-                    if (!jobs.contains(job)) {
-                        reportedRecoveryFailures.remove(job.id());
-                    }
-                } catch (RuntimeException exception) {
-                    if (reportedRecoveryFailures.add(job.id())) {
-                        AppliedFactory.LOGGER.error(
-                                "Factory workflow {} could not return its owned resources; retaining it for recovery",
-                                job.id(), exception);
-                    }
-                }
-                continue;
-            }
-            var runtime = runtimeFor(job.programSource());
-            if (runtime == null || !ensureInitialized(runtime)) {
-                continue;
-            }
-            var action = job.pendingAction();
-            if (action == null) {
-                failJob(job, "Workflow has no pending action");
-                continue;
-            }
-            if (action.type() == FactoryScriptAction.Type.SLEEP) {
-                if (now - job.actionStartedTick() >= action.sleepTicks()) {
-                    resumeJob(runtime, job, FactoryActionResult.slept());
-                }
-                continue;
-            }
-            try {
-                var result = actionExecutor.perform(job, action);
-                resumeJob(runtime, job, result);
-            } catch (RuntimeException exception) {
-                AppliedFactory.LOGGER.error("Factory action failed", exception);
-                failJob(job, exception.getMessage());
-            }
-        }
-        pruneUnusedRuntimes();
+    @Override
+    public long tick() {
+        return level == null ? 0L : level.getGameTime();
     }
 
-    private void startMissingPassives(RuntimeState runtime) {
-        for (int index = 0; index < runtime.program.passiveHandlerCount(); index++) {
-            var passiveIndex = index;
-            var exists = jobs.stream().anyMatch(job -> job.kind() == FactoryJob.Kind.PASSIVE
-                    && job.programSource().equals(controllerProgram)
-                    && job.passiveIndex() == passiveIndex);
-            if (exists) {
-                continue;
-            }
-            var workflowId = UUID.randomUUID();
-            var step = runtime.runtime.startPassive(index, createContext(
-                    workflowId, null, List.of(), List.of(), List.of(),
-                    EnumSet.allOf(Direction.class)));
-            if (step instanceof ScriptStep.Suspended suspended) {
-                jobs.add(FactoryJob.passive(
-                        workflowId,
-                        controllerProgram,
-                        index,
-                        suspended.continuation(),
-                        suspended.action(),
-                        level.getGameTime()));
-            } else {
-                logScriptFailure("passive " + index + " stopped", step);
-                jobs.add(FactoryJob.stoppedPassive(controllerProgram, index));
-            }
-            setChanged();
-        }
+    @Override
+    public HolderLookup.Provider registries() {
+        return level.registryAccess();
     }
 
-    private void resumeJob(
-            RuntimeState runtime, FactoryJob job, FactoryActionResult result) {
-        var step = runtime.runtime.resume(
-                createContext(
-                        job.id(),
-                        job.orderSide(),
-                        job.inputs(),
-                        job.outputs(),
-                        job.owned(),
-                        EnumSet.allOf(Direction.class)),
-                job.continuation(),
-                result);
-        if (step instanceof ScriptStep.Suspended suspended) {
-            job.setSuspended(
-                    suspended.continuation(), suspended.action(), level.getGameTime());
-        } else if (step instanceof ScriptStep.Completed) {
-            job.markFinished();
-        } else {
-            logScriptFailure("workflow resume", step);
-            job.markFinished();
-        }
-        setChanged();
-    }
-
-    private void failJob(FactoryJob job, String message) {
-        AppliedFactory.LOGGER.error("Factory workflow {} failed: {}", job.id(), message);
-        job.markFinished();
-        setChanged();
-    }
-
-    private void finishJob(FactoryJob job) {
-        if (!job.owned().isEmpty()) {
-            var recoverySide = job.recoverySide();
-            if (recoverySide == null) {
-                recoverySide = firstOnlineNetwork().orElse(null);
-            }
-            if (recoverySide == null || !actionExecutor.returnOwned(job, recoverySide)) {
-                return;
-            }
-        }
-        if (job.kind() == FactoryJob.Kind.PASSIVE
-                && job.programSource().equals(controllerProgram)) {
-            return;
-        }
-        jobs.remove(job);
-        setChanged();
-    }
-
-    private Optional<Direction> firstOnlineNetwork() {
-        for (var side : Direction.values()) {
-            if (networkNodes.get(side).isOnline()) {
-                return Optional.of(side);
-            }
-        }
-        return Optional.empty();
-    }
-
-    private ScriptExecutionContext createContext(
-            UUID workflowId,
-            Direction orderNetwork,
-            List<FactoryResource> inputs,
-            List<FactoryResource> outputs,
-            List<FactoryResource> owned,
-            Set<Direction> accessibleNetworks) {
-        var buses = busesByNetwork();
+    @Override
+    public Set<Direction> onlineNetworks() {
         var online = EnumSet.noneOf(Direction.class);
         for (var side : Direction.values()) {
             var node = networkNodes.get(side);
@@ -690,22 +449,50 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 online.add(side);
             }
         }
-        return new ScriptExecutionContext(
-                workflowId,
-                level == null ? 0L : level.getGameTime(),
-                orderNetwork,
-                inputs,
-                outputs,
-                owned,
-                buses,
-                accessibleNetworks,
-                online,
-                level.registryAccess());
+        return online;
+    }
+
+    @Override
+    public boolean returnOwned(List<FactoryResource> owned, Direction side) {
+        return actionExecutor.returnOwned(owned, side);
+    }
+
+    @Override
+    public FactoryActionResult performAction(
+            FactoryJob job, FactoryScriptAction action) {
+        return actionExecutor.perform(job, action);
+    }
+
+    @Override
+    public void markChanged() {
+        setChanged();
+    }
+
+    @Override
+    public void reportScriptFailure(String stage, String message) {
+        AppliedFactory.LOGGER.error("Factory {} failed: {}", stage, message);
+        if (!reportedScriptFailures.add(stage + '\n' + message)
+                || !(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        var notification = Component.translatable(
+                "chat.mefactorymanager.script_error",
+                Component.literal(worldPosition.toShortString()),
+                Component.literal(stage),
+                Component.literal(message)).withStyle(ChatFormatting.RED);
+        for (var subscriber : errorSubscribers) {
+            ServerPlayer player = serverLevel.getServer().getPlayerList().getPlayer(subscriber);
+            if (player != null) {
+                player.sendSystemMessage(notification);
+            }
+        }
     }
 
     private final EnumMap<Direction, String> lastBusDiagSignatures = new EnumMap<>(Direction.class);
 
-    private Map<Direction, List<FactoryBusPart>> busesByNetwork() {
+    @Override
+    public Map<Direction, List<FactoryBusPart>> busesByNetwork() {
         var result = new EnumMap<Direction, List<FactoryBusPart>>(Direction.class);
         for (var side : Direction.values()) {
             var node = networkNodes.get(side);
@@ -756,30 +543,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 .findFirst();
     }
 
-    private long topologyFingerprint(Set<Direction> watchedNetworks) {
-        long result = 1;
-        var buses = busesByNetwork();
-        for (var side : Direction.values()) {
-            if (!watchedNetworks.contains(side)) {
-                continue;
-            }
-            var node = networkNodes.get(side);
-            result = 31 * result + side.ordinal();
-            result = 31 * result + Boolean.hashCode(node != null && node.isOnline());
-            result = 31 * result + System.identityHashCode(node == null ? null : node.getGrid());
-            for (var bus : buses.getOrDefault(side, List.of())) {
-                result = 31 * result + bus.address().hashCode();
-                var machine = bus.machine().orElse(null);
-                result = 31 * result + (machine == null ? 0 : machine.blockId().hashCode());
-                result = 31 * result + Boolean.hashCode(
-                        machine != null && machine.hasItemStorage());
-                result = 31 * result + (machine == null || machine.blockEntityTypeId() == null
-                        ? 0 : machine.blockEntityTypeId().hashCode());
-            }
-        }
-        return result;
-    }
-
     private Optional<FactoryActionExecutor.NetworkEndpoint> getNetworkStorage(Direction side) {
         var node = networkNodes.get(side);
         var attachment = networkAttachments.get(side);
@@ -789,14 +552,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         return Optional.of(new FactoryActionExecutor.NetworkEndpoint(
                 node.getGrid().getStorageService().getInventory(),
                 IActionSource.ofMachine(attachment)));
-    }
-
-    private void pruneUnusedRuntimes() {
-        var usedSources = new LinkedHashSet<String>();
-        usedSources.add(controllerProgram);
-        jobs.stream().filter(job -> !job.finished()).map(FactoryJob::programSource)
-                .forEach(usedSources::add);
-        runtimes.keySet().removeIf(source -> !usedSources.contains(source));
     }
 
     private static List<FactoryResource> collectInputs(
@@ -827,34 +582,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 .toList();
     }
 
-    private void logScriptFailure(String stage, ScriptStep step) {
-        if (step instanceof ScriptStep.Failed failed) {
-            reportScriptFailure(stage, failed.message());
-        } else if (!(step instanceof ScriptStep.Completed)) {
-            reportScriptFailure(stage, "Ended unexpectedly: " + step.getClass().getSimpleName());
-        }
-    }
-
-    private void reportScriptFailure(String stage, String message) {
-        AppliedFactory.LOGGER.error("Factory {} failed: {}", stage, message);
-        if (!reportedScriptFailures.add(stage + '\n' + message)
-                || !(level instanceof ServerLevel serverLevel)) {
-            return;
-        }
-
-        var notification = Component.translatable(
-                "chat.mefactorymanager.script_error",
-                Component.literal(worldPosition.toShortString()),
-                Component.literal(stage),
-                Component.literal(message)).withStyle(ChatFormatting.RED);
-        for (var subscriber : errorSubscribers) {
-            ServerPlayer player = serverLevel.getServer().getPlayerList().getPlayer(subscriber);
-            if (player != null) {
-                player.sendSystemMessage(notification);
-            }
-        }
-    }
-
     private void markChangedAndSync() {
         setChanged();
         if (level != null && !level.isClientSide) {
@@ -871,8 +598,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         if (!level.isClientSide) {
             // 为子网供电
             controller.bridgePowerBetweenNetworks();
-            // 运行刻任务
-            controller.tickFactoryJobs();
+            // 推进脚本任务（挂起 job 恢复/重试/终结、被动处理器、资源回收）
+            if (controller.program != null) {
+                controller.program.step();
+            }
         }
     }
 
@@ -951,9 +680,9 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
         dropInventory(patternInventory);
         dropInventory(cache.inventory());
-        jobs.clear();
-        reportedRecoveryFailures.clear();
-        runtimes.clear();
+        if (program != null) {
+            program.discard();
+        }
         setChanged();
     }
 
@@ -974,23 +703,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     private record OfferedPattern(
             IPatternDetails details, Direction orderNetwork, ScriptHandlerRef handler) {
-    }
-
-    private static final class RuntimeState {
-        private final ScriptRuntime runtime;
-        private final CompiledControllerProgram program;
-        private final boolean valid;
-        private boolean initialized;
-        private boolean attempted;
-        private long lastTopology;
-        private long lastAttemptedTopology;
-
-        private RuntimeState(
-                ScriptRuntime runtime, CompiledControllerProgram program, boolean valid) {
-            this.runtime = runtime;
-            this.program = program;
-            this.valid = valid;
-        }
     }
 
     private record EnergyNetwork(IEnergyService service, double stored, double demand) {
