@@ -152,11 +152,11 @@ function feedFurnace(ctx, resources) {
  */
 function collectFurnaceOutput(ctx, output) {
   while (true) {
-    const products = output.items().extract();
+    var products = output.items().extract();
     if (products.length !== 0) {
       return products;
     }
-    ctx.sleep(5);
+    ctx.sleep(20);
   }
 }
 
@@ -168,7 +168,7 @@ function collectFurnaceOutput(ctx, output) {
  */
 function deliverToNetwork(ctx, network, resources) {
   while (!network.items().push(resources)) {
-    ctx.sleep(1);
+    ctx.sleep(5);
   }
 }
 
@@ -209,12 +209,10 @@ function smelt(ctx) {
     for (var i = 0; i < buses.length; i++) {
       var bus = buses[i];
       var target = bus.target();
-      if (target !== null && target.id === "minecraft:redstone_lamp" && bus.targetFace === "up") {
+      if (target !== null && bus.targetFace == "up") {
         lamps.push(bus);
       }
     }
-    ctx.log(lamps.length.toString())
-    // Sort west-to-east (ascending X), then south-to-north if tied (ascending Z).
     lamps.sort(function (a, b) {
       var ax = a.targetAddress.x;
       var bx = b.targetAddress.x;
