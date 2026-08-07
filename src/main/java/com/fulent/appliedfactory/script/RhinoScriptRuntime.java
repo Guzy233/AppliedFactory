@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.ObjectInputFilter;
 import java.util.Arrays;
 
+import org.jetbrains.annotations.Nullable;
 import org.mozilla.javascript.Context;
 import org.mozilla.javascript.ContextAction;
 import org.mozilla.javascript.ContextFactory;
@@ -58,76 +59,23 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
     }
 
     @Override
-    public ScriptStep runInitializer(ScriptExecutionContext request) {
-        var loaded = environment;
-        if (loaded == null) {
-            return new ScriptStep.Failed("Factory program is not loaded");
-        }
-        var initializer = loaded.registration().initializer;
-        if (initializer == null) {
-            return new ScriptStep.Completed();
-        }
-        try {
-            return inContext(context -> {
-                loaded.bridge().bind(request, RuntimeBridge.InvocationKind.INITIALIZER, null);
-                try {
-                    initializer.call(context, loaded.scope(), loaded.scope(),
-                            new Object[] { loaded.bridge().contextObject() });
-                    return new ScriptStep.Completed();
-                } finally {
-                    loaded.bridge().unbind();
-                }
-            });
-        } catch (RuntimeException | RhinoInstructionLimitError exception) {
-            AppliedFactory.LOGGER.warn("Factory initializer failed", exception);
-            return new ScriptStep.Failed(messageOf(exception));
-        }
-    }
-
-    @Override
-    public ScriptStep startProcessing(
+    public ScriptStep startHandler(
             ScriptHandlerRef handler, ScriptExecutionContext request) {
         var loaded = environment;
         if (loaded == null) {
             return new ScriptStep.Failed("Factory program is not loaded");
         }
-        Function function;
-        if (handler.kind() == ScriptHandlerRef.Kind.CONTROLLER) {
-            function = loaded.registration().controllerHandler;
-        } else {
-            function = handler.index() < loaded.registration().patternHandlers.size()
-                    ? loaded.registration().patternHandlers.get(handler.index())
-                    : null;
-        }
-        return start(loaded, function, request, RuntimeBridge.InvocationKind.PROCESSING,
-                "Processing handler is not registered");
-    }
-
-    @Override
-    public ScriptStep startPassive(int handlerIndex, ScriptExecutionContext request) {
-        var loaded = environment;
-        if (loaded == null) {
-            return new ScriptStep.Failed("Factory program is not loaded");
-        }
-        var function = handlerIndex >= 0 && handlerIndex < loaded.registration().passiveHandlers.size()
-                ? loaded.registration().passiveHandlers.get(handlerIndex)
-                : null;
-        return start(loaded, function, request, RuntimeBridge.InvocationKind.PASSIVE,
-                "Passive handler is not registered");
-    }
-
-    private ScriptStep start(
-            RuntimeEnvironment loaded,
-            Function function,
-            ScriptExecutionContext request,
-            RuntimeBridge.InvocationKind kind,
-            String missingMessage) {
+        var function = resolveHandler(loaded.registration(), handler);
         if (function == null) {
-            return new ScriptStep.Failed(missingMessage);
+            if (handler.kind() == ScriptHandlerRef.Kind.INITIALIZER) {
+                // No initialize() registration means initialization is trivially complete.
+                return new ScriptStep.Completed();
+            }
+            return new ScriptStep.Failed("Factory handler is not registered: " + handler.kind());
         }
         try {
             return inContext(context -> {
-                loaded.bridge().bind(request, kind, null);
+                loaded.bridge().bind(request, null);
                 try {
                     try {
                         context.callFunctionWithContinuations(function, loaded.scope(),
@@ -144,6 +92,20 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
             AppliedFactory.LOGGER.warn("Failed to start factory workflow", exception);
             return new ScriptStep.Failed(messageOf(exception));
         }
+    }
+
+    private static @Nullable Function resolveHandler(
+            Registration registration, ScriptHandlerRef handler) {
+        return switch (handler.kind()) {
+            case CONTROLLER -> registration.controllerHandler;
+            case INITIALIZER -> registration.initializer;
+            case PATTERN -> handler.index() < registration.patternHandlers.size()
+                    ? registration.patternHandlers.get(handler.index())
+                    : null;
+            case PASSIVE -> handler.index() < registration.passiveHandlers.size()
+                    ? registration.passiveHandlers.get(handler.index())
+                    : null;
+        };
     }
 
     @Override
@@ -166,11 +128,7 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
                 var reuse = continuation instanceof RhinoContinuation live
                         ? live.contextObject()
                         : null;
-                loaded.bridge().bind(request,
-                        request.orderNetwork() == null
-                                ? RuntimeBridge.InvocationKind.PASSIVE
-                                : RuntimeBridge.InvocationKind.PROCESSING,
-                        reuse);
+                loaded.bridge().bind(request, reuse);
                 try {
                     final Object restored;
                     try {

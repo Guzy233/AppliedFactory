@@ -75,7 +75,6 @@ final class RuntimeBridge {
     private Scriptable resourcePrototype;
     private Scriptable contextObject;
     private ScriptExecutionContext request;
-    private InvocationKind invocationKind;
 
     RuntimeBridge(Context context, Scriptable scope) {
         installContext = context;
@@ -113,10 +112,8 @@ final class RuntimeBridge {
      */
     void bind(
             ScriptExecutionContext request,
-            InvocationKind kind,
             @Nullable Scriptable reuseContextObject) {
         this.request = request;
-        invocationKind = kind;
         contextObject = reuseContextObject != null
                 ? reuseContextObject
                 : createContextObject(Context.getCurrentContext());
@@ -125,7 +122,6 @@ final class RuntimeBridge {
 
     void unbind() {
         request = null;
-        invocationKind = null;
         contextObject = null;
         ScriptableObject.putProperty(scope, CONTEXT_NAME, Undefined.instance);
     }
@@ -249,41 +245,30 @@ final class RuntimeBridge {
             AppliedFactory.LOGGER.info("[Factory script] {}", Context.toString(args[0]));
             return Undefined.instance;
         }));
-        if (invocationKind != InvocationKind.INITIALIZER) {
-            defineReadOnly(result, "sleep", function((callContext, args) -> {
-                requireArity(args, 1, 1, "ctx.sleep(ticks)");
-                return suspend(callContext, FactoryScriptAction.sleep(
-                        nonNegativeInt(args[0], "sleep duration")));
-            }));
-            defineReadOnly(result, "yield", function((callContext, args) -> {
-                requireArity(args, 0, 0, "ctx.yield()");
-                return suspend(callContext, FactoryScriptAction.sleep(1));
-            }));
-            defineReadOnly(result, "fail", function((callContext, args) -> {
-                requireArity(args, 1, 1, "ctx.fail(message)");
-                throw scriptError(Context.toString(args[0]));
-            }));
-        }
-        if (invocationKind == InvocationKind.PROCESSING) {
+        defineReadOnly(result, "sleep", function((callContext, args) -> {
+            requireArity(args, 1, 1, "ctx.sleep(ticks)");
+            return suspend(callContext, FactoryScriptAction.sleep(
+                    nonNegativeInt(args[0], "sleep duration")));
+        }));
+        defineReadOnly(result, "yield", function((callContext, args) -> {
+            requireArity(args, 0, 0, "ctx.yield()");
+            return suspend(callContext, FactoryScriptAction.sleep(1));
+        }));
+        defineReadOnly(result, "fail", function((callContext, args) -> {
+            requireArity(args, 1, 1, "ctx.fail(message)");
+            throw scriptError(Context.toString(args[0]));
+        }));
+        // Every workflow (processing, passive, initializer) may own cached resources.
+        defineLiveReadOnly(result, "owned", () -> resourceArray(
+                Context.getCurrentContext(), request.owned(), request.workflowId()));
+        // Processing-only data: present exactly when the job carries an order network.
+        if (request.orderNetwork() != null) {
             defineLiveReadOnly(result, "inputs", () -> resourceArray(
                     Context.getCurrentContext(), request.inputs(), request.workflowId()));
             defineLiveReadOnly(result, "outputs", () -> resourceArray(
                     Context.getCurrentContext(), request.outputs(), null));
-            defineLiveReadOnly(result, "owned", () -> resourceArray(
-                    Context.getCurrentContext(), request.owned(), request.workflowId()));
-            if (request.orderNetwork() == null) {
-                throw new IllegalStateException("Processing context has no order network");
-            }
-            defineLiveReadOnly(result, "orderNetwork", () -> {
-                var orderSide = request.orderNetwork();
-                if (orderSide == null) {
-                    throw scriptError("Processing context has no order network");
-                }
-                return networkObject(Context.getCurrentContext(), orderSide);
-            });
-        } else if (invocationKind == InvocationKind.PASSIVE) {
-            defineLiveReadOnly(result, "owned", () -> resourceArray(
-                    Context.getCurrentContext(), request.owned(), request.workflowId()));
+            defineLiveReadOnly(result, "orderNetwork", () -> networkObject(
+                    Context.getCurrentContext(), request.orderNetwork()));
         }
         return result;
     }
@@ -321,29 +306,24 @@ final class RuntimeBridge {
             return machine != null && machine.matchesBlock(Context.toString(args[0]));
         }));
         defineReadOnly(result, "drop", method((cx, self, args) -> {
-            requireWorkflow("bus.drop");
             requireArity(args, 1, 1, "bus.drop(resources)");
             return suspend(cx, FactoryScriptAction.busDrop(
                     requireBus(self), parseOwned(args[0])));
         }));
         defineReadOnly(result, "use", method((cx, self, args) -> {
-            requireWorkflow("bus.use");
             requireArity(args, 0, 0, "bus.use()");
             return suspend(cx, FactoryScriptAction.busUse(requireBus(self)));
         }));
         defineReadOnly(result, "place", method((cx, self, args) -> {
-            requireWorkflow("bus.place");
             requireArity(args, 1, 1, "bus.place(resource)");
             return suspend(cx, FactoryScriptAction.busPlace(
                     requireBus(self), parseOwnedUnit(args[0])));
         }));
         defineReadOnly(result, "break", method((cx, self, args) -> {
-            requireWorkflow("bus.break");
             requireArity(args, 0, 0, "bus.break()");
             return suspend(cx, FactoryScriptAction.busBreak(requireBus(self)));
         }));
         defineReadOnly(result, "redstone", method((cx, self, args) -> {
-            requireWorkflow("bus.redstone");
             requireArity(args, 1, 1, "bus.redstone(level)");
             var level = nonNegativeInt(args[0], "redstone level");
             if (level > 15) {
@@ -367,13 +347,11 @@ final class RuntimeBridge {
             return resourceArray(cx, resources, null);
         }));
         defineReadOnly(result, "push", method((cx, self, args) -> {
-            requireWorkflow("bus.items().push");
             requireArity(args, 1, 1, "bus.items().push(resources)");
             return suspend(cx, FactoryScriptAction.busPush(
                     requireBus(self), parseOwned(args[0])));
         }));
         defineReadOnly(result, "extract", method((cx, self, args) -> {
-            requireWorkflow("bus.items().extract");
             requireArity(args, 0, 0, "bus.items().extract()");
             return suspend(cx, FactoryScriptAction.busExtract(requireBus(self)));
         }));
@@ -396,13 +374,11 @@ final class RuntimeBridge {
     private Scriptable createNetworkItemsPrototype() {
         var result = installContext.newObject(scope);
         defineReadOnly(result, "push", method((cx, self, args) -> {
-            requireWorkflow("network.items().push");
             requireArity(args, 1, 1, "network.items().push(resources)");
             return suspend(cx, FactoryScriptAction.networkPush(
                     requireNetwork(self), parseOwned(args[0])));
         }));
         defineReadOnly(result, "extract", method((cx, self, args) -> {
-            requireWorkflow("network.items().extract");
             requireArity(args, 1, 1, "network.items().extract(requests)");
             return suspend(cx, FactoryScriptAction.networkExtract(
                     requireNetwork(self), parseResourceSpecs(args[0], "network requests")));
@@ -741,12 +717,6 @@ final class RuntimeBridge {
         throw pending;
     }
 
-    private void requireWorkflow(String operation) {
-        if (invocationKind == InvocationKind.INITIALIZER) {
-            throw scriptError(operation + " is not available in initialize");
-        }
-    }
-
     private static List<FactoryResource> resources(List<ItemStack> stacks) {
         var amounts = new LinkedHashMap<AEKey, Long>();
         for (var stack : stacks) {
@@ -955,12 +925,6 @@ final class RuntimeBridge {
             return;
         }
         throw new IllegalStateException("Factory script objects must support internal properties");
-    }
-
-    enum InvocationKind {
-        INITIALIZER,
-        PROCESSING,
-        PASSIVE
     }
 
     @FunctionalInterface

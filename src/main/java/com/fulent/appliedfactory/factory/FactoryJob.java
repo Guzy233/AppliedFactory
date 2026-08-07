@@ -6,12 +6,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.fulent.appliedfactory.script.FactoryActionResult;
 import com.fulent.appliedfactory.script.FactoryScriptAction;
 import com.fulent.appliedfactory.script.ScriptContinuation;
+import com.fulent.appliedfactory.script.ScriptExecutionContext;
+import com.fulent.appliedfactory.script.ScriptHandlerRef;
+import com.fulent.appliedfactory.script.ScriptRuntime;
+import com.fulent.appliedfactory.script.ScriptStep;
 
 import appeng.api.stacks.AEKey;
 import net.minecraft.core.Direction;
@@ -21,121 +27,85 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 
 /**
- * A suspended script workflow owned by one {@link FactoryProgram}. A job has exactly one
- * active state — suspended. Script advancement is synchronous on the server thread, so a
- * job is either suspended (waiting for a pending action to be retried or resumed) or gone:
- * finishing a job hands any leftover owned resources to the program's recovery queue.
+ * A suspended script workflow owned by one {@link FactoryProgram}. Subclasses carry only the
+ * parameters that differ at creation time (processing inputs/outputs, passive index, ...); the
+ * whole lifecycle — starting, resuming, suspending, resource ownership and persistence — lives
+ * here and is identical for every kind. A job exists only while suspended: finishing hands any
+ * leftover owned resources to the program's recovery queue.
  */
-public final class FactoryJob {
-    private static final String ID_TAG = "Id";
-    private static final String KIND_TAG = "Kind";
-    private static final String ORDER_SIDE_TAG = "OrderSide";
-    private static final String RECOVERY_SIDE_TAG = "RecoverySide";
-    private static final String PASSIVE_INDEX_TAG = "PassiveIndex";
-    private static final String INPUTS_TAG = "Inputs";
-    private static final String OUTPUTS_TAG = "Outputs";
-    private static final String OWNED_TAG = "Owned";
-    private static final String CONTINUATION_TAG = "Continuation";
-    private static final String ACTION_TAG = "Action";
-    private static final String ACTION_STARTED_TAG = "ActionStarted";
+public abstract class FactoryJob {
+    static final String ID_TAG = "Id";
+    static final String OWNED_TAG = "Owned";
+    static final String RECOVERY_SIDE_TAG = "RecoverySide";
+    static final String CONTINUATION_TAG = "Continuation";
+    static final String ACTION_TAG = "Action";
+    static final String ACTION_STARTED_TAG = "ActionStarted";
 
     private final UUID id;
-    private final Kind kind;
-    @Nullable
-    private final Direction orderSide;
+    private final FactoryProgram.Host host;
+    private final Set<Direction> accessibleNetworks;
+    private List<FactoryResource> owned;
     /**
      * The last network side the job interacted with; used as the preferred recovery target
      * when the job ends with owned resources still cached. Set by the action executor.
      */
     @Nullable
     private Direction recoverySide;
-    private final int passiveIndex;
-    private final List<FactoryResource> inputs;
-    private final List<FactoryResource> outputs;
-    private List<FactoryResource> owned;
     private ScriptContinuation continuation;
     @Nullable
     private FactoryScriptAction pendingAction;
     private long actionStartedTick;
 
-    public static FactoryJob processing(
+    protected FactoryJob(
             UUID id,
-            Direction orderSide,
-            List<FactoryResource> inputs,
-            List<FactoryResource> outputs,
-            ScriptContinuation continuation,
-            FactoryScriptAction action,
-            long actionStartedTick) {
-        return new FactoryJob(
-                id,
-                Kind.PROCESSING,
-                orderSide,
-                orderSide,
-                -1,
-                inputs,
-                outputs,
-                inputs,
-                continuation,
-                action,
-                actionStartedTick);
-    }
-
-    public static FactoryJob passive(
-            UUID id,
-            int passiveIndex,
-            ScriptContinuation continuation,
-            FactoryScriptAction action,
-            long actionStartedTick) {
-        return new FactoryJob(
-                id,
-                Kind.PASSIVE,
-                null,
-                null,
-                passiveIndex,
-                List.of(),
-                List.of(),
-                List.of(),
-                continuation,
-                action,
-                actionStartedTick);
-    }
-
-    private FactoryJob(
-            UUID id,
-            Kind kind,
-            @Nullable Direction orderSide,
-            @Nullable Direction recoverySide,
-            int passiveIndex,
-            List<FactoryResource> inputs,
-            List<FactoryResource> outputs,
+            FactoryProgram.Host host,
+            Set<Direction> accessibleNetworks,
             List<FactoryResource> owned,
+            @Nullable Direction recoverySide,
             ScriptContinuation continuation,
             @Nullable FactoryScriptAction pendingAction,
             long actionStartedTick) {
         this.id = Objects.requireNonNull(id, "id");
-        this.kind = Objects.requireNonNull(kind, "kind");
-        this.orderSide = orderSide;
-        this.recoverySide = recoverySide;
-        this.passiveIndex = passiveIndex;
-        this.inputs = normalize(inputs);
-        this.outputs = normalize(outputs);
+        this.host = Objects.requireNonNull(host, "host");
+        this.accessibleNetworks = Set.copyOf(accessibleNetworks);
         this.owned = normalize(owned);
+        this.recoverySide = recoverySide;
         this.continuation = Objects.requireNonNull(continuation, "continuation");
         this.pendingAction = pendingAction;
         this.actionStartedTick = actionStartedTick;
     }
 
+    // ---- Subclass hooks ----------------------------------------------------
+
+    /** Which registered handler this job invokes when it starts. */
+    abstract ScriptHandlerRef handlerRef();
+
+    /** Builds the per-invocation execution context from this job's parameters. */
+    abstract ScriptExecutionContext createContext();
+
+    /** Writes this subclass's parameters into the save tag. */
+    abstract void saveParams(CompoundTag tag, HolderLookup.Provider registries);
+
+    // ---- Lifecycle (identical for every kind) ------------------------------
+
+    /** Starts the handler; the returned step carries the continuation if it suspended. */
+    ScriptStep start(ScriptRuntime runtime) {
+        return runtime.startHandler(handlerRef(), createContext());
+    }
+
+    /** Resumes the suspended continuation with the outcome of its last pending action. */
+    ScriptStep resume(ScriptRuntime runtime, FactoryActionResult result) {
+        return runtime.resume(createContext(), continuation, result);
+    }
+
+    // ---- State accessors ---------------------------------------------------
+
     public UUID id() {
         return id;
     }
 
-    public Kind kind() {
-        return kind;
-    }
-
-    @Nullable
-    public Direction orderSide() {
-        return orderSide;
+    public List<FactoryResource> owned() {
+        return owned;
     }
 
     @Nullable
@@ -147,22 +117,6 @@ public final class FactoryJob {
         if (recoverySide == null) {
             recoverySide = Objects.requireNonNull(side, "side");
         }
-    }
-
-    public int passiveIndex() {
-        return passiveIndex;
-    }
-
-    public List<FactoryResource> inputs() {
-        return inputs;
-    }
-
-    public List<FactoryResource> outputs() {
-        return outputs;
-    }
-
-    public List<FactoryResource> owned() {
-        return owned;
     }
 
     public ScriptContinuation continuation() {
@@ -201,69 +155,42 @@ public final class FactoryJob {
         actionStartedTick = startedTick;
     }
 
+    // ---- Persistence -------------------------------------------------------
+
     /**
      * Serializes this suspended job. Continuation serialization may throw (the program then
      * degrades this job to a recovery entry so its owned resources survive the chunk save).
      */
-    public CompoundTag save(HolderLookup.Provider registries) {
+    CompoundTag save(HolderLookup.Provider registries) {
         var tag = new CompoundTag();
         tag.putUUID(ID_TAG, id);
-        tag.putString(KIND_TAG, kind.name());
-        if (orderSide != null) {
-            tag.putString(ORDER_SIDE_TAG, orderSide.getName());
-        }
+        tag.put(OWNED_TAG, saveResources(owned, registries));
         if (recoverySide != null) {
             tag.putString(RECOVERY_SIDE_TAG, recoverySide.getName());
         }
-        tag.putInt(PASSIVE_INDEX_TAG, passiveIndex);
-        tag.put(INPUTS_TAG, saveResources(inputs, registries));
-        tag.put(OUTPUTS_TAG, saveResources(outputs, registries));
-        tag.put(OWNED_TAG, saveResources(owned, registries));
         tag.putByteArray(CONTINUATION_TAG, continuation.serialize());
         tag.put(ACTION_TAG, Objects.requireNonNull(pendingAction, "pendingAction").save(registries));
         tag.putLong(ACTION_STARTED_TAG, actionStartedTick);
+        saveParams(tag, registries);
         return tag;
     }
 
-    public static Optional<FactoryJob> load(CompoundTag tag, HolderLookup.Provider registries) {
+    /** Restores a persisted job; the subclass is chosen by its persisted parameters. */
+    static Optional<FactoryJob> load(
+            CompoundTag tag, FactoryProgram.Host host, HolderLookup.Provider registries) {
         if (!tag.hasUUID(ID_TAG)
-                || !tag.contains(KIND_TAG, Tag.TAG_STRING)
-                || !tag.contains(PASSIVE_INDEX_TAG, Tag.TAG_INT)
-                || !isCompoundList(tag, INPUTS_TAG)
-                || !isCompoundList(tag, OUTPUTS_TAG)
                 || !isCompoundList(tag, OWNED_TAG)
                 || !tag.contains(CONTINUATION_TAG, Tag.TAG_BYTE_ARRAY)
                 || !tag.contains(ACTION_STARTED_TAG, Tag.TAG_LONG)) {
             return Optional.empty();
         }
-
-        final Kind kind;
-        try {
-            kind = Kind.valueOf(tag.getString(KIND_TAG));
-        } catch (IllegalArgumentException exception) {
+        var owned = loadResources(tag.getList(OWNED_TAG, Tag.TAG_COMPOUND), registries);
+        if (owned.isEmpty()) {
             return Optional.empty();
         }
-
-        var orderSide = tag.contains(ORDER_SIDE_TAG, Tag.TAG_STRING)
-                ? Direction.byName(tag.getString(ORDER_SIDE_TAG))
-                : null;
         var recoverySide = tag.contains(RECOVERY_SIDE_TAG, Tag.TAG_STRING)
                 ? Direction.byName(tag.getString(RECOVERY_SIDE_TAG))
                 : null;
-        var passiveIndex = tag.getInt(PASSIVE_INDEX_TAG);
-        if (kind == Kind.PROCESSING && (orderSide == null || passiveIndex != -1)
-                || kind == Kind.PASSIVE && passiveIndex < 0) {
-            return Optional.empty();
-        }
-
-        var inputs = loadResources(tag.getList(INPUTS_TAG, Tag.TAG_COMPOUND), registries);
-        var outputs = loadResources(tag.getList(OUTPUTS_TAG, Tag.TAG_COMPOUND), registries);
-        var owned = loadResources(tag.getList(OWNED_TAG, Tag.TAG_COMPOUND), registries);
-        if (inputs.isEmpty() || outputs.isEmpty() || owned.isEmpty()
-                || kind == Kind.PROCESSING && (inputs.get().isEmpty() || outputs.get().isEmpty())) {
-            return Optional.empty();
-        }
-
         var action = tag.contains(ACTION_TAG, Tag.TAG_COMPOUND)
                 ? FactoryScriptAction.load(tag.getCompound(ACTION_TAG), registries).orElse(null)
                 : null;
@@ -271,22 +198,39 @@ public final class FactoryJob {
         if (action == null || continuation.length == 0) {
             return Optional.empty();
         }
-
-        return Optional.of(new FactoryJob(
-                tag.getUUID(ID_TAG),
-                kind,
-                orderSide,
-                recoverySide,
-                passiveIndex,
-                inputs.get(),
-                outputs.get(),
-                owned.get(),
-                ScriptContinuation.ofPersisted(continuation),
-                action,
-                tag.getLong(ACTION_STARTED_TAG)));
+        var actionStartedTick = tag.getLong(ACTION_STARTED_TAG);
+        if (tag.contains(ProcessingJob.ORDER_SIDE_TAG, Tag.TAG_STRING)) {
+            return ProcessingJob.loadParams(tag, host, registries, owned.get(), recoverySide,
+                    action, continuation, actionStartedTick);
+        }
+        if (tag.contains(PassiveJob.PASSIVE_INDEX_TAG, Tag.TAG_INT)) {
+            return PassiveJob.loadParams(tag, host, registries, owned.get(), recoverySide,
+                    action, continuation, actionStartedTick);
+        }
+        return Optional.empty();
     }
 
-    private static List<FactoryResource> normalize(List<FactoryResource> resources) {
+    // ---- Shared helpers ----------------------------------------------------
+
+    /** Builds a context from common state plus subclass-supplied processing data. */
+    protected ScriptExecutionContext context(
+            @Nullable Direction orderSide,
+            List<FactoryResource> inputs,
+            List<FactoryResource> outputs) {
+        return new ScriptExecutionContext(
+                id,
+                host.tick(),
+                orderSide,
+                inputs,
+                outputs,
+                owned,
+                host.busesByNetwork(),
+                accessibleNetworks,
+                host.onlineNetworks(),
+                host.registries());
+    }
+
+    static List<FactoryResource> normalize(List<FactoryResource> resources) {
         var amounts = new LinkedHashMap<AEKey, Long>();
         for (var resource : resources) {
             Objects.requireNonNull(resource, "resource");
@@ -298,7 +242,7 @@ public final class FactoryJob {
                 .toList();
     }
 
-    private static ListTag saveResources(
+    static ListTag saveResources(
             List<FactoryResource> resources, HolderLookup.Provider registries) {
         var list = new ListTag();
         for (var resource : resources) {
@@ -307,7 +251,7 @@ public final class FactoryJob {
         return list;
     }
 
-    private static Optional<List<FactoryResource>> loadResources(
+    static Optional<List<FactoryResource>> loadResources(
             ListTag list, HolderLookup.Provider registries) {
         var result = new ArrayList<FactoryResource>(list.size());
         for (int index = 0; index < list.size(); index++) {
@@ -324,7 +268,7 @@ public final class FactoryJob {
         }
     }
 
-    private static boolean isCompoundList(CompoundTag tag, String key) {
+    static boolean isCompoundList(CompoundTag tag, String key) {
         if (!tag.contains(key, Tag.TAG_LIST)) {
             return false;
         }
@@ -368,10 +312,5 @@ public final class FactoryJob {
             result.merge(resource.key(), resource.amount(), Math::addExact);
         }
         return result;
-    }
-
-    public enum Kind {
-        PROCESSING,
-        PASSIVE
     }
 }

@@ -18,7 +18,6 @@ import com.fulent.appliedfactory.script.FactoryActionResult;
 import com.fulent.appliedfactory.script.FactoryScriptAction;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
 import com.fulent.appliedfactory.script.ScriptContinuation;
-import com.fulent.appliedfactory.script.ScriptExecutionContext;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
 import com.fulent.appliedfactory.script.ScriptRuntime;
 import com.fulent.appliedfactory.script.ScriptStep;
@@ -35,16 +34,16 @@ import net.minecraft.nbt.Tag;
  * is bound to this program's runtime, and every job's continuation is only resumable against
  * that same scope.
  *
- * <p>Responsibilities: evaluating the source, running the initializer when the watched
- * topology changes, offering pattern→handler bindings ({@link #compiled()}), starting
- * processing jobs, and advancing every suspended job once per server tick via {@link #step()}.
- * A job exists only while suspended; ending a job immediately removes it, handing any leftover
- * owned resources to the recovery queue, which retries returning them until the network accepts
- * them. Recompiling ({@link #replace}) cancels every job of the old program and transfers its
- * recovery entries to the new one.
+ * <p>Responsibilities: evaluating the source, running the initializer (as an in-memory
+ * {@link InitializerJob}) whenever the watched topology changes, offering pattern→handler
+ * bindings ({@link #compiled()}), starting processing jobs, and advancing every suspended job
+ * once per server tick via {@link #step()}. A job exists only while suspended; ending a job
+ * immediately removes it, handing any leftover owned resources to the recovery queue, which
+ * retries returning them until the network accepts them. Recompiling ({@link #replace}) cancels
+ * every job of the old program and transfers its recovery entries to the new one.
  */
 public final class FactoryProgram {
-    public static final int MAX_JOBS = 16;
+    public static final int MAX_JOBS = 64;
     private static final String JOBS_NBT_KEY = "FactoryJobs";
     private static final String RECOVERY_NBT_KEY = "FactoryRecovery";
 
@@ -81,6 +80,11 @@ public final class FactoryProgram {
     private final List<RecoveryEntry> recovery = new ArrayList<>();
     private final Set<Integer> stoppedPassives = new HashSet<>();
     private final Set<UUID> reportedRecoveryFailures = new HashSet<>();
+    /**
+     * The active initializer, in memory only (never persisted — after a chunk reload the
+     * program simply re-initializes). Non-null while initialization is pending or suspended.
+     */
+    private InitializerJob initializerJob;
 
     private FactoryProgram(
             ScriptRuntime runtime, CompiledControllerProgram program, Host host) {
@@ -146,11 +150,13 @@ public final class FactoryProgram {
     // ---- Ticking -------------------------------------------------------------
 
     /**
-     * Advances every suspended job by one step (resume, retry a pending action, or finish),
-     * starts missing passive handlers, and retries pending recovery. Runs once per server tick.
+     * Advances the initializer, every suspended job and pending recovery by one step. Runs
+     * once per server tick. Until initialization completes, no passives start, no jobs advance
+     * and no recovery is retried — the factory waits for its initializer.
      */
     public void step() {
-        if (!ensureInitialized()) {
+        stepInitializer();
+        if (!initialized) {
             return;
         }
         startMissingPassives();
@@ -159,23 +165,7 @@ public final class FactoryProgram {
             if (!jobs.contains(job)) {
                 continue;
             }
-            var action = job.pendingAction();
-            if (action == null) {
-                terminate(job, "Workflow has no pending action");
-                continue;
-            }
-            if (action.type() == FactoryScriptAction.Type.SLEEP) {
-                if (now - job.actionStartedTick() >= action.sleepTicks()) {
-                    resume(job, FactoryActionResult.slept());
-                }
-                continue;
-            }
-            try {
-                resume(job, host.performAction(job, action));
-            } catch (RuntimeException exception) {
-                AppliedFactory.LOGGER.error("Factory action failed", exception);
-                terminate(job, exception.getMessage());
-            }
+            advance(job, now);
         }
         processRecovery();
     }
@@ -190,43 +180,31 @@ public final class FactoryProgram {
             return false;
         }
         var workflowId = UUID.randomUUID();
-        var context = new ScriptExecutionContext(
+        var job = new ProcessingJob(
                 workflowId,
-                host.tick(),
+                host,
+                EnumSet.allOf(Direction.class),
+                handler,
                 orderSide,
                 inputs,
                 outputs,
                 inputs,
-                host.busesByNetwork(),
-                EnumSet.allOf(Direction.class),
-                host.onlineNetworks(),
-                host.registries());
-        var step = runtime.startProcessing(handler, context);
+                ScriptContinuation.empty(),
+                null,
+                0);
+        var step = job.start(runtime);
         if (step instanceof ScriptStep.Failed failed) {
             host.reportScriptFailure("processing start", failed.message());
             return false;
         }
         if (step instanceof ScriptStep.Suspended suspended) {
-            jobs.add(FactoryJob.processing(
-                    workflowId,
-                    orderSide,
-                    inputs,
-                    outputs,
-                    suspended.continuation(),
-                    suspended.action(),
-                    host.tick()));
+            job.setSuspended(suspended.continuation(), suspended.action(), host.tick());
+            jobs.add(job);
         } else {
             // The handler returned without suspending: the cached inputs are immediately
             // returned to the order network (or held for recovery while it is offline).
-            var completed = FactoryJob.processing(
-                    workflowId,
-                    orderSide,
-                    inputs,
-                    outputs,
-                    ScriptContinuation.empty(),                    null,
-                    host.tick());
-            jobs.add(completed);
-            terminate(completed, null);
+            jobs.add(job);
+            finishJob(job, null);
         }
         host.markChanged();
         return true;
@@ -245,7 +223,12 @@ public final class FactoryProgram {
                 entries.add(new RecoveryEntry(job.id(), job.owned(), job.recoverySide()));
             }
         }
+        if (initializerJob != null && !initializerJob.owned().isEmpty()) {
+            entries.add(new RecoveryEntry(
+                    initializerJob.id(), initializerJob.owned(), initializerJob.recoverySide()));
+        }
         jobs.clear();
+        initializerJob = null;
         stoppedPassives.clear();
         reportedRecoveryFailures.clear();
         initialized = false;
@@ -260,6 +243,7 @@ public final class FactoryProgram {
         recovery.clear();
         stoppedPassives.clear();
         reportedRecoveryFailures.clear();
+        initializerJob = null;
     }
 
     // ---- Persistence ---------------------------------------------------------
@@ -303,7 +287,7 @@ public final class FactoryProgram {
         recovery.clear();
         var savedJobs = tag.getList(JOBS_NBT_KEY, Tag.TAG_COMPOUND);
         for (int index = 0; index < savedJobs.size(); index++) {
-            FactoryJob.load(savedJobs.getCompound(index), registries).ifPresent(jobs::add);
+            FactoryJob.load(savedJobs.getCompound(index), host, registries).ifPresent(jobs::add);
         }
         var savedRecovery = tag.getList(RECOVERY_NBT_KEY, Tag.TAG_COMPOUND);
         for (int index = 0; index < savedRecovery.size(); index++) {
@@ -315,41 +299,50 @@ public final class FactoryProgram {
     // ---- Internals -----------------------------------------------------------
 
     private int activeProcessingJobs() {
-        return (int) jobs.stream()
-                .filter(job -> job.kind() == FactoryJob.Kind.PROCESSING)
-                .count();
+        return (int) jobs.stream().filter(job -> job instanceof ProcessingJob).count();
     }
 
+    /** Whether initialization is complete for the current topology. */
     private boolean ensureInitialized() {
+        return initialized
+                && !environmentDirty
+                && lastTopology == topologyFingerprint();
+    }
+
+    /**
+     * Creates or advances the initializer until initialization completes or fails. While the
+     * initializer is suspended, a topology change keeps advancing the same job (its live
+     * getters read the new topology) rather than restarting it; a finished or failed attempt
+     * for the current topology is not retried until the topology changes again.
+     */
+    private void stepInitializer() {
         var fingerprint = topologyFingerprint();
         if (!environmentDirty && initialized && lastTopology == fingerprint) {
-            return true;
+            return;
         }
-        if (attempted && !environmentDirty && lastAttemptedTopology == fingerprint) {
-            return false;
+        if (attempted && !environmentDirty && lastAttemptedTopology == fingerprint
+                && initializerJob == null) {
+            // A previous attempt failed for this topology; wait for the topology to change.
+            return;
         }
         attempted = true;
         lastAttemptedTopology = fingerprint;
         environmentDirty = false;
-        var step = runtime.runInitializer(new ScriptExecutionContext(
-                new UUID(0, 0),
-                host.tick(),
-                null,
-                List.of(),
-                List.of(),
-                List.of(),
-                host.busesByNetwork(),
-                program.initializerNetworks(),
-                host.onlineNetworks(),
-                host.registries()));
-        if (step instanceof ScriptStep.Completed) {
-            initialized = true;
-            lastTopology = fingerprint;
-            return true;
+        if (initializerJob == null) {
+            initializerJob = new InitializerJob(UUID.randomUUID(), host,
+                    program.initializerNetworks());
+            var step = initializerJob.start(runtime);
+            if (step instanceof ScriptStep.Suspended suspended) {
+                initializerJob.setSuspended(
+                        suspended.continuation(), suspended.action(), host.tick());
+                host.markChanged();
+            } else {
+                finishJob(initializerJob,
+                        step instanceof ScriptStep.Failed failed ? failed.message() : null);
+            }
+            return;
         }
-        initialized = false;
-        host.reportScriptFailure("initializer", messageOf(step));
-        return false;
+        advance(initializerJob, host.tick());
     }
 
     private void startMissingPassives() {
@@ -358,70 +351,89 @@ public final class FactoryProgram {
                 continue;
             }
             var passiveIndex = index;
-            var exists = jobs.stream().anyMatch(job -> job.kind() == FactoryJob.Kind.PASSIVE
-                    && job.passiveIndex() == passiveIndex);
+            var exists = jobs.stream().anyMatch(job -> job instanceof PassiveJob passive
+                    && passive.passiveIndex() == passiveIndex);
             if (exists) {
                 continue;
             }
             var workflowId = UUID.randomUUID();
-            var step = runtime.startPassive(index, new ScriptExecutionContext(
-                    workflowId,
-                    host.tick(),
-                    null,
-                    List.of(),
-                    List.of(),
-                    List.of(),
-                    host.busesByNetwork(),
-                    EnumSet.allOf(Direction.class),
-                    host.onlineNetworks(),
-                    host.registries()));
+            var job = new PassiveJob(
+                    workflowId, host, EnumSet.allOf(Direction.class), passiveIndex, List.of(),
+                    ScriptContinuation.empty(), null, 0);
+            var step = job.start(runtime);
             if (step instanceof ScriptStep.Suspended suspended) {
-                jobs.add(FactoryJob.passive(
-                        workflowId,
-                        index,
-                        suspended.continuation(),
-                        suspended.action(),
-                        host.tick()));
+                job.setSuspended(suspended.continuation(), suspended.action(), host.tick());
+                jobs.add(job);
             } else {
-                host.reportScriptFailure("passive " + index + " stopped", messageOf(step));
-                stoppedPassives.add(index);
+                if (step instanceof ScriptStep.Failed failed) {
+                    host.reportScriptFailure("passive " + passiveIndex + " stopped",
+                            failed.message());
+                }
+                stoppedPassives.add(passiveIndex);
             }
             host.markChanged();
         }
     }
 
+    private void advance(FactoryJob job, long now) {
+        var action = job.pendingAction();
+        if (action == null) {
+            finishJob(job, "Workflow has no pending action");
+            return;
+        }
+        if (action.type() == FactoryScriptAction.Type.SLEEP) {
+            if (now - job.actionStartedTick() >= action.sleepTicks()) {
+                resume(job, FactoryActionResult.slept());
+            }
+            return;
+        }
+        try {
+            resume(job, host.performAction(job, action));
+        } catch (RuntimeException exception) {
+            AppliedFactory.LOGGER.error("Factory action failed", exception);
+            finishJob(job, exception.getMessage());
+        }
+    }
+
     private void resume(FactoryJob job, FactoryActionResult result) {
-        var step = runtime.resume(
-                new ScriptExecutionContext(
-                        job.id(),
-                        host.tick(),
-                        job.orderSide(),
-                        job.inputs(),
-                        job.outputs(),
-                        job.owned(),
-                        host.busesByNetwork(),
-                        EnumSet.allOf(Direction.class),
-                        host.onlineNetworks(),
-                        host.registries()),
-                job.continuation(),
-                result);
+        var step = job.resume(runtime, result);
         if (step instanceof ScriptStep.Suspended suspended) {
             job.setSuspended(suspended.continuation(), suspended.action(), host.tick());
             host.markChanged();
         } else if (step instanceof ScriptStep.Completed) {
-            terminate(job, null);
+            finishJob(job, null);
         } else {
-            host.reportScriptFailure("workflow resume", messageOf(step));
-            terminate(job, messageOf(step));
+            var message = messageOf(step);
+            if (job != initializerJob) {
+                // Initializer failures are reported by finishJob as "initializer".
+                host.reportScriptFailure("workflow resume", message);
+            }
+            finishJob(job, message);
         }
     }
 
-    private void terminate(FactoryJob job, @Nullable String message) {
-        if (message != null) {
-            AppliedFactory.LOGGER.error("Factory workflow {} failed: {}", job.id(), message);
-        }
-        if (job.kind() == FactoryJob.Kind.PASSIVE) {
-            stoppedPassives.add(job.passiveIndex());
+    /**
+     * Ends a job: records the initializer/passive scheduling outcome, reports failures, then
+     * returns the job's owned resources (or defers them to the recovery queue).
+     */
+    private void finishJob(FactoryJob job, @Nullable String failureMessage) {
+        if (job == initializerJob) {
+            initializerJob = null;
+            if (failureMessage == null) {
+                initialized = true;
+                lastTopology = lastAttemptedTopology;
+            } else {
+                initialized = false;
+                host.reportScriptFailure("initializer", failureMessage);
+            }
+        } else {
+            if (job instanceof PassiveJob passive) {
+                stoppedPassives.add(passive.passiveIndex());
+            }
+            if (failureMessage != null) {
+                AppliedFactory.LOGGER.error("Factory workflow {} failed: {}",
+                        job.id(), failureMessage);
+            }
         }
         finalizeOwned(job);
     }

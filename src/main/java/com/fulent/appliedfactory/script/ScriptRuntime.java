@@ -4,11 +4,11 @@ package com.fulent.appliedfactory.script;
 public interface ScriptRuntime {
     ProgramLoadResult<CompiledControllerProgram> loadProgram(String source);
 
-    ScriptStep runInitializer(ScriptExecutionContext request);
-
-    ScriptStep startProcessing(ScriptHandlerRef handler, ScriptExecutionContext request);
-
-    ScriptStep startPassive(int handlerIndex, ScriptExecutionContext request);
+    /**
+     * Starts any registered handler (initializer, controller, pattern or passive). The handler
+     * may suspend; the returned step then carries its continuation for later {@link #resume}.
+     */
+    ScriptStep startHandler(ScriptHandlerRef handler, ScriptExecutionContext request);
 
     ScriptStep resume(
             ScriptExecutionContext request,
