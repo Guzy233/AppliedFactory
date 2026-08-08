@@ -22,15 +22,18 @@ import net.minecraft.world.level.Level;
 
 /**
  * Links factory jobs to their AE crafting request and fires a synchronous callback when that
- * request is cancelled. AE2 never notifies {@link ICraftingProvider}s of cancellation, so instead
- * of polling the crafting service every tick:
+ * request ends. AE2 never notifies {@link ICraftingProvider}s of cancellation or completion, so
+ * instead of polling the crafting service every tick:
  *
  * <ul>
  *   <li>{@code executeCrafting} pushes patterns for one crafting request at a time — the request's
  *       id is captured into {@link CraftingRequestContext} so the factory can stamp its jobs.
- *   <li>{@code finishJob(false)} is the single funnel for every CPU cancellation ({@code cancel()},
- *       the canceled-link tick check, {@code ICraftingCPU.cancelJob()}); the owning controllers on
- *       the CPU's grid are told the request id so they can cancel their matching jobs.
+ *   <li>{@code finishJob(success)} is the single funnel for every end of a crafting request
+ *       ({@code cancel()}, the canceled-link tick check, {@code ICraftingCPU.cancelJob()}, and a
+ *       successful completion once all requested outputs are delivered). The owning controllers on
+ *       the CPU's grid are told the request id so they can cancel their matching jobs: a successful
+ *       finish means the request's outputs are already satisfied, possibly supplied by another
+ *       source, so any still-running factory job for that request is redundant.
  * </ul>
  */
 @Mixin(CraftingCpuLogic.class)
@@ -59,10 +62,7 @@ public abstract class CraftingCpuLogicMixin {
     }
 
     @Inject(method = "finishJob", at = @At("HEAD"))
-    private void factoryNotifyCraftingRequestCancelled(boolean success, CallbackInfo ci) {
-        if (success) {
-            return;
-        }
+    private void factoryNotifyCraftingRequestFinished(boolean success, CallbackInfo ci) {
         try {
             var craftingId = craftingIdOf((CraftingCpuLogic) (Object) this);
             if (craftingId == null) {
@@ -76,11 +76,11 @@ public abstract class CraftingCpuLogicMixin {
             // to the controller's own server tick so no storage/grid service is re-entered while
             // the crafting service is updating.
             for (var controller : grid.getMachines(FactoryControllerBlockEntity.class)) {
-                controller.onCraftingRequestCanceled(craftingId);
+                controller.onCraftingRequestFinished(craftingId);
             }
         } catch (RuntimeException exception) {
             AppliedFactory.LOGGER.error(
-                    "Failed to notify factory controllers of a cancelled crafting request", exception);
+                    "Failed to notify factory controllers of a finished crafting request", exception);
         }
     }
 

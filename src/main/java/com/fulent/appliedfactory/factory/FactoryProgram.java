@@ -216,9 +216,11 @@ public final class FactoryProgram {
 
     /**
      * Cancels every processing job pushed for the given AE crafting request, called by the host
-     * when a crafting CPU reports its request cancelled. The job is finished on the next
-     * {@link #step()} (see {@link #pendingCancellations}); owned resources are returned to the
-     * network like any other job end.
+     * when a crafting CPU reports its request ended — whether cancelled or completed successfully
+     * (a successful completion means the request's outputs are already satisfied, possibly by
+     * another source, so any still-running job for it is redundant). The job is finished on the
+     * next {@link #step()} (see {@link #pendingCancellations}); owned resources are returned to
+     * the network like any other job end.
      */
     public void cancelJobs(UUID craftingRequestId) {
         pendingCancellations.add(craftingRequestId);
@@ -236,8 +238,7 @@ public final class FactoryProgram {
                     continue;
                 }
                 AppliedFactory.LOGGER.info(
-                        "Factory workflow {} cancelled: its AE crafting request was cancelled",
-                        job.id());
+                        "Factory workflow {} cancelled: its AE crafting request ended", job.id());
                 finishJob(job, null);
             }
         }

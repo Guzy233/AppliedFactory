@@ -494,8 +494,13 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
     }
 
-    /** Called by the crafting CPU mixin when one of our crafting requests is cancelled. */
-    public void onCraftingRequestCanceled(UUID craftingRequestId) {
+    /**
+     * Called by the crafting CPU mixin when one of our crafting requests ends:
+     * both explicit cancellation and successful completion (the request's outputs
+     * are already satisfied, possibly by another source). In either case every
+     * still-running job for that request is redundant and gets cancelled.
+     */
+    public void onCraftingRequestFinished(UUID craftingRequestId) {
         if (program != null) {
             program.cancelJobs(craftingRequestId);
         }

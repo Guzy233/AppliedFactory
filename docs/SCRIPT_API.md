@@ -649,6 +649,8 @@ registerControllerHandler({
 - 每次 AE 推送产生独立 workflow；
 - `ctx.inputs` 和 `ctx.outputs` 来自该次样板执行。
 
+processing job 在对应 AE crafting 请求结束时会被取消，无论该请求是用户取消、链路失效，还是 AE 判定输出已齐（例如请求输出由其他方式回料、或被其他 job 一并取回）。取消发生在控制器下一次 tick：未消费的 owned 资源退回下单网络（recovery 兜底），脚本 continuation 不再恢复，等价于该次任务已视为完成。
+
 ## 14. 被动产线
 
 被动产线直接注册一个长期运行函数：
