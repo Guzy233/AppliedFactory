@@ -86,7 +86,7 @@ public final class FactoryMachineAccess {
     }
 
     public boolean isLoaded() {
-        return level.hasChunkAt(position);
+        return level.isLoaded(position);
     }
 
     public ResourceLocation blockId() {

@@ -5,7 +5,6 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-import org.mozilla.javascript.Context;
 
 /**
  * Marks a method as a callable read-only property. Two signatures are supported:
