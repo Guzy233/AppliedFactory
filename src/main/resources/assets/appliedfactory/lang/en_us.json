@@ -11,9 +11,5 @@
   "gui.appliedfactory.save_success": "Saved",
   "gui.appliedfactory.syntax_error": "Syntax error: %s",
   "gui.appliedfactory.subscribe_errors": "Subscribe to errors",
-  "gui.appliedfactory.cache": "Private cache",
-  "gui.appliedfactory.storage": "Controller storage",
-  "gui.appliedfactory.patterns": "Processing patterns",
-  "gui.appliedfactory.inventory": "Player inventory",
   "chat.appliedfactory.script_error": "Factory controller %s script error (%s): %s"
 }

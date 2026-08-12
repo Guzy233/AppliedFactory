@@ -1,9 +1,10 @@
 package com.fulent.appliedfactory.script;
 
-/** Result of starting or resuming one durable script workflow. */
+import com.fulent.appliedfactory.factory.FactoryAction;
+
+/** Outcome of advancing one JavaScript generator once. */
 public sealed interface ScriptStep {
-    record Suspended(ScriptContinuation continuation, FactoryScriptAction action)
-            implements ScriptStep {
+    record Waiting(FactoryAction action) implements ScriptStep {
     }
 
     record Completed() implements ScriptStep {

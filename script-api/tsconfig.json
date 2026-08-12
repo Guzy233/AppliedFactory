@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES5",
+    "target": "ES2015",
     "strict": true,
     "allowJs": true,
     "checkJs": true,
@@ -11,7 +11,6 @@
   },
   "include": [
     "*.ts",
-    "demo.js",
     "factory-controller.d.ts"
   ],
   "exclude": [

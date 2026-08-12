@@ -16,15 +16,17 @@ import java.util.UUID;
 
 import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.factory.FactoryActionExecutor;
-import com.fulent.appliedfactory.factory.FactoryCellCache;
-import com.fulent.appliedfactory.factory.FactoryJob;
+import com.fulent.appliedfactory.factory.FactoryBusAddress;
+import com.fulent.appliedfactory.factory.FactoryEndpoint;
+import com.fulent.appliedfactory.factory.FactoryEscrow;
 import com.fulent.appliedfactory.factory.FactoryProgram;
 import com.fulent.appliedfactory.factory.FactoryResource;
+import com.fulent.appliedfactory.factory.FactoryResourceOrigin;
+import com.fulent.appliedfactory.factory.FactoryTransferAction;
+import com.fulent.appliedfactory.factory.FactoryTransferResult;
 import com.fulent.appliedfactory.part.FactoryBusPart;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgram;
-import com.fulent.appliedfactory.script.FactoryActionResult;
-import com.fulent.appliedfactory.script.FactoryScriptAction;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
 
@@ -50,14 +52,12 @@ import appeng.api.util.AECableType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.ChatFormatting;
@@ -68,39 +68,19 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.neoforged.neoforge.items.IItemHandler;
-import net.neoforged.neoforge.items.ItemStackHandler;
 
 /** Six independent AE endpoints coordinated by one bus-centric script runtime. */
 public final class FactoryControllerBlockEntity extends BlockEntity
         implements IGridNodeListener<FactoryControllerBlockEntity>,
         IInWorldGridNodeHost, IPowerChannelState, FactoryProgram.Host {
-    public static final int PATTERN_SLOTS = 9;
-    public static final int CACHE_SLOTS = 3;
     private static final double MAX_POWER_TRANSFER_PER_NETWORK = 1_024.0D;
     private static final double POWER_EPSILON = 0.0001D;
-    private static final String PATTERNS_NBT_KEY = "Patterns";
-    private static final String CACHE_NBT_KEY = "FactoryCache";
+    private static final String ESCROW_NBT_KEY = "FactoryEscrow";
     private static final String ERROR_SUBSCRIBERS_NBT_KEY = "ErrorSubscribers";
     private static final String ERROR_SUBSCRIBER_ID_NBT_KEY = "Id";
-    private static final ResourceLocation AE2_PROCESSING_PATTERN_ID =
-            ResourceLocation.fromNamespaceAndPath("ae2", "processing_pattern");
-
-    private final ItemStackHandler patternInventory = new ItemStackHandler(PATTERN_SLOTS) {
-        @Override
-        public boolean isItemValid(int slot, ItemStack stack) {
-            return AE2_PROCESSING_PATTERN_ID.equals(BuiltInRegistries.ITEM.getKey(stack.getItem()));
-        }
-
-        @Override
-        protected void onContentsChanged(int slot) {
-            invalidatePatterns();
-            markChangedAndSync();
-        }
-    };
-    private final FactoryCellCache cache = new FactoryCellCache(CACHE_SLOTS, this::setChanged);
+    private final FactoryEscrow escrow = new FactoryEscrow(this::setChanged);
     private final FactoryActionExecutor actionExecutor = new FactoryActionExecutor(
-            cache, this::resolveBus, this::getNetworkStorage, this::setChanged);
+            escrow, this::resolveBusTarget, this::getNetworkStorage, this::setChanged);
     private final Map<Direction, NetworkAttachment> networkAttachments =
             new EnumMap<>(Direction.class);
     private final Map<Direction, IManagedGridNode> networkNodes =
@@ -117,12 +97,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      * player can fix and re-save it.
      */
     private FactoryProgram program;
-    /**
-     * Set while building a client update tag. Jobs (and their continuations) are never synced to
-     * clients, so we skip serializing them there — otherwise every block update would pay the full
-     * continuation serialization cost only to have {@link #getUpdateTag} strip the result.
-     */
-    private transient boolean suppressJobPersistence;
+    private boolean programInitialized;
 
     public FactoryControllerBlockEntity(BlockPos pos, BlockState state) {
         super(AppliedFactory.FACTORY_CONTROLLER_BLOCK_ENTITY.get(), pos, state);
@@ -149,6 +124,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private void createGridNodes() {
         if (level != null) {
             networkNodes.values().forEach(node -> node.create(level, worldPosition));
+            if (!level.isClientSide && !programInitialized) {
+                programInitialized = true;
+                program = createProgram(controllerProgram);
+                invalidatePatterns();
+            }
         }
     }
 
@@ -171,12 +151,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     @Override
     protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries) {
         super.loadAdditional(tag, registries);
-        if (tag.contains(PATTERNS_NBT_KEY, Tag.TAG_COMPOUND)) {
-            patternInventory.deserializeNBT(registries, tag.getCompound(PATTERNS_NBT_KEY));
-        }
-        if (tag.contains(CACHE_NBT_KEY, Tag.TAG_COMPOUND)) {
-            cache.inventory().deserializeNBT(registries, tag.getCompound(CACHE_NBT_KEY));
-        }
+        escrow.load(
+                tag.contains(ESCROW_NBT_KEY, Tag.TAG_COMPOUND)
+                        ? tag.getCompound(ESCROW_NBT_KEY)
+                        : new CompoundTag(),
+                registries);
         controllerProgram = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
                 ? tag.getString(ControllerProgram.NBT_KEY)
                 : ControllerProgram.DEFAULT_SOURCE;
@@ -190,22 +169,15 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             }
         }
         program = createProgram(controllerProgram);
-        if (program != null) {
-            program.loadJobs(tag, registries);
-        }
+        programInitialized = true;
         networkNodes.values().forEach(node -> node.loadFromNBT(tag));
         invalidatePatterns();
     }
 
     @Override
     protected void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
-        cache.persistCells();
-        tag.put(PATTERNS_NBT_KEY, patternInventory.serializeNBT(registries));
-        tag.put(CACHE_NBT_KEY, cache.inventory().serializeNBT(registries));
+        tag.put(ESCROW_NBT_KEY, escrow.save(registries));
         tag.putString(ControllerProgram.NBT_KEY, controllerProgram);
-        if (!suppressJobPersistence && program != null) {
-            program.saveJobs(tag, registries);
-        }
         var savedSubscribers = new ListTag();
         for (var subscriber : errorSubscribers) {
             var subscriberTag = new CompoundTag();
@@ -219,12 +191,9 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     @Override
     public CompoundTag getUpdateTag(HolderLookup.Provider registries) {
-        suppressJobPersistence = true;
-        try {
-            return saveWithoutMetadata(registries);
-        } finally {
-            suppressJobPersistence = false;
-        }
+        var tag = saveWithoutMetadata(registries);
+        tag.remove(ESCROW_NBT_KEY);
+        return tag;
     }
 
     @Override
@@ -241,8 +210,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     public void onStateChanged(
             FactoryControllerBlockEntity owner, IGridNode node, State state) {
         invalidatePatterns();
-        // Grid state changed: re-run the initializer on the next step even if the watched
-        // bus set looks unchanged (e.g. a grid identity change).
+        // Grid state changed: notify the script's network.onChange listeners on the next step.
         if (program != null) {
             program.markEnvironmentChanged();
         }
@@ -269,24 +237,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         return networkNodes.values().stream().anyMatch(IManagedGridNode::isActive);
     }
 
-    public IItemHandler getPatternInventory() {
-        return patternInventory;
-    }
-
-    public IItemHandler getCacheInventory() {
-        return cache.inventory();
-    }
-
-    public boolean isCacheLocked() {
-        return program != null && program.hasLockedCache();
-    }
-
     public String getControllerProgram() {
         return controllerProgram;
-    }
-
-    public CompiledControllerProgram getCompiledProgram() {
-        return program == null ? CompiledControllerProgram.EMPTY : program.compiled();
     }
 
     public boolean isErrorSubscribed(UUID playerId) {
@@ -300,10 +252,9 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     /**
-     * Compiles before committing so an invalid edit cannot replace the currently running
-     * program. A successful replacement cancels every job of the old revision (their
-     * continuations are bound to the old Rhino scope); their owned resources move to the new
-     * program's recovery queue and are returned to the network as soon as it accepts them.
+     * Compiles before committing so an invalid edit cannot replace the running program.
+     * Successful replacement discards old in-memory generators; their escrow allocations are
+     * recovered by the replacement on its next tick.
      */
     public ProgramLoadResult<FactoryProgram> updateControllerProgram(String source) {
         var result = FactoryProgram.replace(program, source, this);
@@ -312,6 +263,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
         controllerProgram = source;
         program = result.program();
+        programInitialized = true;
         reportedScriptFailures.clear();
         invalidatePatterns();
         markChangedAndSync();
@@ -341,18 +293,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
         var compiled = program == null ? CompiledControllerProgram.EMPTY : program.compiled();
         var offers = new ArrayList<OfferedPattern>();
-        if (level != null && compiled.hasControllerHandler()) {
-            for (int slot = 0; slot < patternInventory.getSlots(); slot++) {
-                var details = PatternDetailsHelper.decodePattern(
-                        patternInventory.getStackInSlot(slot), level);
-                if (details != null) {
-                    offers.add(new OfferedPattern(
-                            details,
-                            compiled.controllerOrderNetwork(),
-                            ScriptHandlerRef.controller()));
-                }
-            }
-        }
         if (level != null) {
             for (var pattern : compiled.scriptPatterns()) {
                 var details = PatternDetailsHelper.decodePattern(pattern.encodedPattern(), level);
@@ -391,36 +331,25 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                         .filter(candidate -> candidate.details.equals(patternDetails))
                         .findFirst())
                 .orElse(null);
-        if (offered == null || !cache.hasStorageCell()) {
+        if (offered == null) {
             return false;
         }
 
         var inputs = collectInputs(patternDetails, inputHolder);
         var outputs = collectOutputs(patternDetails);
-        if (inputs.isEmpty() || outputs.isEmpty() || !cache.storeAll(inputs)) {
+        if (inputs.isEmpty() || outputs.isEmpty()) {
             return false;
         }
-
-        // The program owns the job from here on: inputs are committed to the cache. On any
-        // failure the cache rollback below restores them so the network can retry.
         if (!program.startJob(offered.handler, networkSide, inputs, outputs)) {
-            requireCacheRollback(inputs);
             return false;
         }
         setChanged();
         return true;
     }
 
-    private void requireCacheRollback(List<FactoryResource> resources) {
-        if (!cache.removeAll(resources)) {
-            throw new IllegalStateException("Factory cache could not roll back rejected pattern input");
-        }
-    }
-
     private boolean isBusy(Direction side) {
         return program == null
                 || !program.canAcceptJobs()
-                || !cache.hasStorageCell()
                 || availablePatterns(side).isEmpty();
     }
 
@@ -449,19 +378,44 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
-    public boolean returnOwned(List<FactoryResource> owned, Direction side) {
-        return actionExecutor.returnOwned(owned, side);
+    public Optional<com.fulent.appliedfactory.factory.FactoryBusTarget> busTarget(
+            com.fulent.appliedfactory.factory.FactoryBusAddress address) {
+        return resolveBusTarget(address);
     }
 
     @Override
-    public FactoryActionResult performAction(
-            FactoryJob job, FactoryScriptAction action) {
-        return actionExecutor.perform(job, action);
+    public List<FactoryResource> availableResources(FactoryEndpoint endpoint) {
+        return actionExecutor.available(endpoint);
     }
 
     @Override
-    public Optional<FactoryActionExecutor.NetworkEndpoint> networkStorage(Direction side) {
-        return getNetworkStorage(side);
+    public long availableAmount(FactoryResourceOrigin origin, AEKey key) {
+        return actionExecutor.available(origin, key);
+    }
+
+    @Override
+    public FactoryTransferResult performTransfer(
+            UUID workflowId,
+            FactoryTransferAction action) {
+        return actionExecutor.perform(workflowId, action);
+    }
+
+    @Override
+    public boolean createEscrow(
+            UUID workflowId,
+            Direction recoverySide,
+            List<FactoryResource> resources) {
+        return escrow.create(workflowId, recoverySide, resources);
+    }
+
+    @Override
+    public Set<UUID> escrowIds() {
+        return escrow.allocationIds();
+    }
+
+    @Override
+    public boolean recoverEscrow(UUID workflowId) {
+        return actionExecutor.recoverEscrow(workflowId);
     }
 
     @Override
@@ -469,20 +423,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         setChanged();
     }
 
-    @Override
-    public long requestedCraftingAmount(Direction side, AEKey key) {
-        var node = networkNodes.get(side);
-        var grid = node == null ? null : node.getGrid();
-        if (grid == null || !node.isOnline()) {
-            return 0;
-        }
-        return grid.getCraftingService().getRequestedAmount(key);
-    }
-
     /**
      * Called by the AE2 grid mixins and the bus part when a factory bus joined/left a network or
      * its target machine changed. Event-driven replacement for the old per-tick topology
-     * fingerprint: re-runs the initializer on the next step.
+     * fingerprint: notifies network.onChange listeners on the next step.
      */
     public void onBusTopologyChanged() {
         if (program != null) {
@@ -523,10 +467,16 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
     }
 
-    private final EnumMap<Direction, String> lastBusDiagSignatures = new EnumMap<>(Direction.class);
-
     @Override
-    public Map<Direction, List<FactoryBusPart>> busesByNetwork() {
+    public Map<Direction, List<FactoryBusAddress>> busAddressesByNetwork() {
+        var result = new EnumMap<Direction, List<FactoryBusAddress>>(Direction.class);
+        currentBusesByNetwork().forEach((side, buses) -> result.put(side, buses.stream()
+                .flatMap(bus -> bus.address().stream())
+                .toList()));
+        return result;
+    }
+
+    private Map<Direction, List<FactoryBusPart>> currentBusesByNetwork() {
         var result = new EnumMap<Direction, List<FactoryBusPart>>(Direction.class);
         for (var side : Direction.values()) {
             var node = networkNodes.get(side);
@@ -541,32 +491,14 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                             .thenComparing(bus -> bus.getSide() == null
                                     ? "" : bus.getSide().getName()))
                     .toList();
-            var signature = new StringBuilder(side.getName()).append('|');
-            for (var bus : collected) {
-                signature.append(System.identityHashCode(bus)).append('@')
-                        .append(bus.getHostPosition()).append('/')
-                        .append(bus.getSide()).append(';');
-            }
-            if (!signature.toString().equals(lastBusDiagSignatures.get(side))) {
-                lastBusDiagSignatures.put(side, signature.toString());
-                for (var bus : collected) {
-                    AppliedFactory.LOGGER.info(
-                            "[bus-diag] side={} partId={} hostBeId={} pos={} partSide={}",
-                            side.getName(),
-                            System.identityHashCode(bus),
-                            System.identityHashCode(bus.hostBlockEntityForDiagnostics()),
-                            bus.getHostPosition(),
-                            bus.getSide());
-                }
-            }
             result.put(side, collected);
         }
         return result;
     }
 
-    public List<FactoryBusPart> getFactoryBuses() {
+    private List<FactoryBusPart> getFactoryBuses() {
         var unique = new LinkedHashSet<FactoryBusPart>();
-        busesByNetwork().values().forEach(unique::addAll);
+        currentBusesByNetwork().values().forEach(unique::addAll);
         return List.copyOf(unique);
     }
 
@@ -575,6 +507,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         return getFactoryBuses().stream()
                 .filter(bus -> bus.address().filter(address::equals).isPresent())
                 .findFirst();
+    }
+
+    private Optional<com.fulent.appliedfactory.factory.FactoryBusTarget> resolveBusTarget(
+            com.fulent.appliedfactory.factory.FactoryBusAddress address) {
+        return resolveBus(address).flatMap(FactoryBusPart::target);
     }
 
     private Optional<FactoryActionExecutor.NetworkEndpoint> getNetworkStorage(Direction side) {
@@ -635,6 +572,20 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             // 推进脚本任务（挂起 job 恢复/重试/终结、被动处理器、资源回收）
             if (controller.program != null) {
                 controller.program.step();
+            } else {
+                controller.recoverAllEscrows();
+            }
+        }
+    }
+
+    /** Recovery must not depend on the current script being valid or loadable. */
+    private void recoverAllEscrows() {
+        for (var escrowId : escrow.allocationIds()) {
+            try {
+                actionExecutor.recoverEscrow(escrowId);
+            } catch (RuntimeException exception) {
+                AppliedFactory.LOGGER.error(
+                        "Factory escrow {} recovery failed", escrowId, exception);
             }
         }
     }
@@ -707,32 +658,28 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
     }
 
-    /** Drops pattern and cell items; cached resources remain physically inside cell items. */
+    /** Materializes every hidden escrow resource. */
     public void dropOwnedContents() {
         if (level == null || level.isClientSide) {
             return;
         }
-        dropInventory(patternInventory);
-        dropInventory(cache.inventory());
+        var escrowDrops = new ArrayList<ItemStack>();
+        for (var resource : escrow.allContents()) {
+            resource.key().addDrops(resource.amount(), escrowDrops, level, worldPosition);
+        }
+        for (var stack : escrowDrops) {
+            Containers.dropItemStack(
+                    level,
+                    worldPosition.getX(),
+                    worldPosition.getY(),
+                    worldPosition.getZ(),
+                    stack);
+        }
+        escrow.clear();
         if (program != null) {
             program.discard();
         }
         setChanged();
-    }
-
-    private void dropInventory(ItemStackHandler inventory) {
-        for (int slot = 0; slot < inventory.getSlots(); slot++) {
-            var stack = inventory.getStackInSlot(slot);
-            if (!stack.isEmpty()) {
-                Containers.dropItemStack(
-                        level,
-                        worldPosition.getX(),
-                        worldPosition.getY(),
-                        worldPosition.getZ(),
-                        stack.copy());
-                inventory.setStackInSlot(slot, ItemStack.EMPTY);
-            }
-        }
     }
 
     private record OfferedPattern(

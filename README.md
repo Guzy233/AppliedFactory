@@ -1,128 +1,40 @@
 # Applied Factory
 
-Scriptable, durable automation for Applied Energistics 2 networks.
+Applied Factory 使用 JavaScript generator 编排 Applied Energistics 2 网络和工厂总线。
 
-Write JavaScript workflows that suspend across ticks, survive server restarts, and coordinate ME storage, Factory Buses, and AE2 crafting.
+当前版本正在进行破坏性 MVP 重构，公开契约见 [脚本 API](docs/SCRIPT_API.md)。旧版 `ctx`、Rhino continuation、任务调用栈序列化和玩家安装的控制器缓存元件不再兼容。
 
-The scripting API is implemented around physical factory buses rather than Java-side logical machines. Its public contract is:
-
-- [Script API design](docs/SCRIPT_API.md)
-
-The data-model document is intentionally not updated by every API experiment;
-the script API document is authoritative for the current public surface.
-
-## Target scripting model
-
-Scripts enumerate buses and use ordinary JavaScript to select and combine
-them:
+目标脚本形式：
 
 ```js
-const production = ctx.network("south");
-const furnaceInputs = production.buses.filter(bus => {
-    const target = bus.target();
-    return target !== null
-        && target.id === "minecraft:furnace"
-        && bus.targetFace === "up"
-        && bus.items() !== null;
-});
-```
+const production = network("south");
 
-A Bus is identified by its dimension, multipart host position, and part side.
-Different faces pointing at the same block share `bus.targetAddress.key`, so
-scripts can implement multi-face machine grouping without a built-in Machine
-type.
+registerProcessingPattern(patterns, function* (order) {
+    const furnace = production.buses.find(bus =>
+        bus.target !== null && bus.target.id === "minecraft:furnace"
+    );
 
-The first-stage item I/O API is deliberately small:
-
-```js
-const items = bus.items();
-
-items.push(ctx.inputs);        // suspends, retries each tick, exact all-or-nothing
-items.pushTillFull(ctx.inputs); // suspends, fills whatever fits each tick until done
-const ok = items.canPush(ctx.inputs); // synchronous one-shot capacity query
-const pulled = items.extract();       // everything currently extractable
-```
-
-`push` and `pushTillFull` suspend the workflow and retry once per server tick
-until they complete, like an AE crafting order waiting on the input. There are
-no partial-transfer result objects; `canPush` is the non-blocking way to ask
-whether an exact full push can happen right now.
-
-Ordering and execution networks are separate. Registrations state which
-controller side advertises the pattern, while handlers explicitly select any
-network used for production:
-
-```js
-registerPatterns({
-    orderNetwork: "north",
-    patterns: [{
-        id: "iron",
-        inputs: [item("minecraft:iron_ore", 1)],
-        outputs: [item("minecraft:iron_ingot", 1)],
-        handler: smelt
-    }]
+    yield order.input.pushExactlyInto(furnace);
+    yield sleep(200);
+    yield furnace.extract().to(order.network);
 });
 
-function smelt(ctx) {
-    const production = ctx.network("south");
-
-    // Select production.buses, push inputs, and extract machine output.
-    // ctx.orderNetwork is the north-side network that submitted this job.
-}
-```
-
-The program can also register one common handler for controller pattern slots
-and topology initialization can listen only to the networks it actually uses:
-
-```js
-initialize({
-    networks: ["south"],
-    handler(ctx) {
-        // Changes on an unrelated north-side main network do not rerun this.
-    }
-});
-```
-
-Passive lines are registered as long-running functions. Each registration has
-one continuation and controls its own rhythm with `sleep`; there are no
-`interval` or `concurrency` options:
-
-```js
-registerPassive(function productionLine(ctx) {
+go(function* () {
     while (true) {
-        // Clear, feed, and collect the line.
-        ctx.sleep(20);
+        // 被动产线。
+        yield sleep(20);
     }
 });
 ```
 
-World-changing calls suspend through a Java action boundary so Rhino can later
-resume at the call site, but one API call still makes only one attempt at the
-selected address.
+核心模型是不可变的 `Resource(origin, bundle)`。普通资源在创建 Resource 时仍留在机器或网络中；Action 在每次重试时同时等待来源库存和目标容量。AE processing 输入则进入按订单隔离的控制器隐形托管区，不需要玩家提供存储元件。
 
-Owned resources are physically escrowed in AE storage cells installed in the
-controller. Losing a JavaScript variable does not delete an item: `ctx.owned`
-reconstructs views from the persistent workflow ledger. A controller without a
-compatible cell refuses processing input and extracts nothing.
+Bus 句柄只绑定总线，不保存目标机器身份。原位替换机器后同一句柄会解析并操作新机器；依赖机器类型的脚本缓存由玩家重新保存脚本，或通过 `network.onChange` 自行刷新。
 
-MFM patterns participate in AE's ordinary crafting plan, which already charges
-a fixed byte cost per pattern execution. Script source and continuation memory
-are not measured, and passive workflows do not occupy AE crafting CPUs.
+服务器重启时不恢复 generator 调用点。processing 托管资源进入恢复流程，被动 workflow 从入口重新开始。
 
 ## Development
 
-Use JDK 21. The current development target is Minecraft 1.21.1 on NeoForge.
-AE2 19.2.17 is declared as a compile-time API dependency and a development
-runtime dependency in `build.gradle`.
+项目目标为 Minecraft 1.21.1、NeoForge、AE2 19.2.17 和 JDK 21。Rhino 以 ES6 编译模式运行。
 
-This project intentionally does not depend on Super Factory Manager or KubeJS.
-Rhino is embedded as the script engine, while the script API is isolated behind
-`ScriptRuntime` so the JavaScript surface remains independent from AE2
-internals.
-
-## Script IDE starter
-
-[`script-api`](script-api) contains an IDE-only API declaration, readable JavaScript
-reference, and a minimal TypeScript starter. Run `npx tsc -p script-api` to compile
-`controller.ts` to `script-api/generated/controller.js`, then paste that JavaScript into
-the controller. TypeScript syntax is stripped before Rhino sees the program.
+仓库中的 `script-api` 目录提供脚本示例与 IDE 参考。

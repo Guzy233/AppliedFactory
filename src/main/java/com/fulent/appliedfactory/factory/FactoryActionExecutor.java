@@ -3,634 +3,334 @@ package com.fulent.appliedfactory.factory;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
-import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.function.Predicate;
-
-import com.fulent.appliedfactory.script.FactoryActionResult;
-import com.fulent.appliedfactory.script.FactoryScriptAction;
-
-import com.google.gson.JsonParseException;
+import java.util.UUID;
 
 import appeng.api.config.Actionable;
 import appeng.api.networking.security.IActionSource;
-import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
-import appeng.api.stacks.AEKeyType;
 import appeng.api.stacks.KeyCounter;
 import appeng.api.storage.MEStorage;
 import net.minecraft.core.Direction;
-import net.minecraft.core.HolderLookup;
-import net.minecraft.core.component.DataComponents;
-import net.minecraft.network.chat.Component;
-import net.minecraft.world.item.ItemStack;
 
-/** Executes one non-waiting script action against the controller's private cache. */
+/** Resolves durable handles for each attempt and moves resources without a controller cell. */
 public final class FactoryActionExecutor {
     private static final IActionSource BUS_SOURCE = IActionSource.empty();
 
-    private final FactoryCellCache cache;
-    private final Function<FactoryBusAddress, Optional<com.fulent.appliedfactory.part.FactoryBusPart>>
-            busResolver;
+    private final FactoryEscrow escrow;
+    private final BusResolver busResolver;
     private final NetworkResolver networkResolver;
     private final Runnable changed;
 
     public FactoryActionExecutor(
-            FactoryCellCache cache,
-            Function<FactoryBusAddress,
-                    Optional<com.fulent.appliedfactory.part.FactoryBusPart>> busResolver,
+            FactoryEscrow escrow,
+            BusResolver busResolver,
             NetworkResolver networkResolver,
             Runnable changed) {
-        this.cache = cache;
-        this.busResolver = busResolver;
-        this.networkResolver = networkResolver;
-        this.changed = changed;
+        this.escrow = Objects.requireNonNull(escrow, "escrow");
+        this.busResolver = Objects.requireNonNull(busResolver, "busResolver");
+        this.networkResolver = Objects.requireNonNull(networkResolver, "networkResolver");
+        this.changed = Objects.requireNonNull(changed, "changed");
     }
 
-    public FactoryActionResult perform(FactoryJob job, FactoryScriptAction action) {
-        return switch (action.type()) {
-            case BUS_PUSH -> FactoryActionResult.pushed(pushToBus(job, action));
-            case BUS_PUSH_TILL_FULL -> pushTillFullToBus(job, action);
-            case BUS_EXTRACT -> FactoryActionResult.extracted(extractFromBus(job, action));
-            case BUS_DROP -> FactoryActionResult.booleanResult(dropFromBus(job, action));
-            case BUS_USE -> FactoryActionResult.booleanResult(useBus(action));
-            case BUS_PLACE -> FactoryActionResult.booleanResult(placeAtBus(job, action));
-            case BUS_BREAK, BUS_BREAK_WITH -> FactoryActionResult.extracted(breakBus(job, action));
-            case BUS_REDSTONE -> FactoryActionResult.booleanResult(setBusRedstone(action));
-            case RENAME_OWNED -> FactoryActionResult.extracted(renameOwned(job, action));
-            case NETWORK_PUSH -> {
-                job.setRecoverySideIfAbsent(action.networkSide());
-                yield FactoryActionResult.pushed(pushToNetwork(
-                        action.networkSide(),
-                        action.resources(),
-                        job::canConsumeOwned,
-                        job::consumeOwned));
-            }
-            case NETWORK_PUSH_TILL_FULL -> {
-                job.setRecoverySideIfAbsent(action.networkSide());
-                yield pushTillFullToNetwork(job, action);
-            }
-            case NETWORK_EXTRACT -> {
-                job.setRecoverySideIfAbsent(action.networkSide());
-                yield FactoryActionResult.extracted(
-                        extractFromNetwork(job, action.networkSide(), action.resources()));
-            }
-            case SLEEP -> throw new IllegalStateException("SLEEP is handled by the scheduler");
-        };
+    public FactoryTransferResult perform(UUID workflowId, FactoryTransferAction action) {
+        if (action.remaining().isEmpty()) {
+            return FactoryTransferResult.complete();
+        }
+        var result = action.mode() == FactoryTransferAction.Mode.EXACT
+                ? exact(workflowId, action)
+                : partial(workflowId, action);
+        action.updateRemaining(result.remaining());
+        return result;
     }
 
-    private boolean dropFromBus(FactoryJob job, FactoryScriptAction action) {
-        var resources = action.resources();
-        if (!job.canConsumeOwned(resources)) {
-            throw new IllegalStateException("Workflow does not own bus drop resources");
-        }
-        var target = resolvedTarget(action.bus());
-        var stacks = toItemStacks(resources);
-        if (target == null || stacks == null || !cache.removeAll(resources)) {
-            return false;
-        }
-        final boolean dropped;
-        try {
-            dropped = target.throwItems(stacks);
-        } catch (RuntimeException exception) {
-            restoreCacheOrThrow(resources, "bus drop", exception);
-            return false;
-        }
-        if (!dropped) {
-            restoreCacheOrThrow(resources, "bus drop", null);
-            return false;
-        }
-        job.consumeOwned(resources);
-        changed.run();
-        return true;
-    }
-
-    private boolean useBus(FactoryScriptAction action) {
-        var target = resolvedTarget(action.bus());
-        return target != null && target.use();
-    }
-
-    private boolean placeAtBus(FactoryJob job, FactoryScriptAction action) {
-        var resource = action.resources().get(0);
-        if (!job.canConsumeOwned(action.resources())) {
-            throw new IllegalStateException("Workflow does not own bus placement resource");
-        }
-        var target = resolvedTarget(action.bus());
-        var stacks = toItemStacks(action.resources());
-        if (target == null || stacks == null || stacks.size() != 1 || !cache.removeAll(action.resources())) {
-            return false;
-        }
-        final boolean placed;
-        try {
-            placed = target.place(stacks.get(0));
-        } catch (RuntimeException exception) {
-            restoreCacheOrThrow(action.resources(), "bus placement", exception);
-            return false;
-        }
-        if (!placed) {
-            restoreCacheOrThrow(action.resources(), "bus placement", null);
-            return false;
-        }
-        job.consumeOwned(List.of(resource));
-        changed.run();
-        return true;
-    }
-
-    private List<FactoryResource> breakBus(FactoryJob job, FactoryScriptAction action) {
-        var target = resolvedTarget(action.bus());
-        if (target == null) {
-            return List.of();
-        }
-        var tool = action.resources().isEmpty() ? null : breakTool(job, action);
-        var preview = resources(target.previewBreakDrops(tool));
-        if (!cache.canStoreAll(preview)) {
-            return List.of();
-        }
-        var result = target.breakAndCollect(tool);
-        if (!result.destroyed()) {
-            return List.of();
-        }
-        var drops = resources(result.drops());
-        if (!drops.isEmpty() && !cache.storeAll(drops)) {
-            // A modded loot table may produce more than its preview. Preserve rather than delete it.
-            target.throwItems(result.drops());
-            return List.of();
-        }
-        job.addOwned(drops);
-        changed.run();
-        return drops;
-    }
-
-    /**
-     * Returns the owned item unit used as the held tool for
-     * {@code BUS_BREAK_WITH}. The tool is only validated for ownership, never
-     * consumed.
-     */
-    private ItemStack breakTool(FactoryJob job, FactoryScriptAction action) {
-        if (!job.canConsumeOwned(action.resources())) {
-            throw new IllegalStateException("Workflow does not own the bus break tool");
-        }
-        var stacks = toItemStacks(action.resources());
-        if (stacks == null || stacks.size() != 1) {
-            throw new IllegalStateException("Bus break tool must be a single item resource");
-        }
-        return stacks.get(0);
-    }
-
-    /**
-     * Applies a custom display name to one owned item resource: the old key is
-     * removed from the cache, every item of that amount is renamed, the renamed
-     * key is stored back and the workflow ledger moves from the old to the new
-     * key. Returns the renamed resources now owned by the workflow.
-     */
-    private List<FactoryResource> renameOwned(FactoryJob job, FactoryScriptAction action) {
-        var resources = action.resources();
-        if (!job.canConsumeOwned(resources)) {
-            throw new IllegalStateException("Workflow does not own rename resource");
-        }
-        if (resources.size() != 1 || !(resources.get(0).key() instanceof AEItemKey)) {
-            return List.of();
-        }
-        var stacks = toItemStacks(resources);
-        if (stacks == null || stacks.isEmpty()) {
-            return List.of();
-        }
-        if (!cache.removeAll(resources)) {
-            return List.of();
-        }
-        final List<FactoryResource> renamed;
-        try {
-            var component = parseName(action.name(), job.registries());
-            var amounts = new LinkedHashMap<AEKey, Long>();
-            for (var stack : stacks) {
-                stack.set(DataComponents.CUSTOM_NAME, component);
-                amounts.merge(AEItemKey.of(stack), (long) stack.getCount(), Math::addExact);
-            }
-            renamed = fromAmounts(amounts);
-            if (!cache.storeAll(renamed)) {
-                restoreCacheOrThrow(resources, "rename", null);
+    /** Current concrete contents of an external endpoint. */
+    public List<FactoryResource> available(FactoryEndpoint endpoint) {
+        var amounts = new LinkedHashMap<AEKey, Long>();
+        if (endpoint.kind() == FactoryEndpoint.Kind.NETWORK) {
+            var network = networkResolver.resolve(endpoint.networkSide()).orElse(null);
+            if (network == null) {
                 return List.of();
             }
-        } catch (RuntimeException exception) {
-            restoreCacheOrThrow(resources, "rename", exception);
-            return List.of();
-        }
-        job.consumeOwned(resources);
-        job.addOwned(renamed);
-        changed.run();
-        return renamed;
-    }
-
-    /** Parses a plain literal name, or a JSON serialized component when valid. */
-    private static Component parseName(String name, HolderLookup.Provider registries) {
-        try {
-            var component = Component.Serializer.fromJson(name, registries);
-            if (component != null) {
-                return component;
-            }
-        } catch (JsonParseException | IllegalArgumentException ignored) {
-            // Not a JSON component; treat as a plain literal name.
-        }
-        return Component.literal(name);
-    }
-
-    private boolean setBusRedstone(FactoryScriptAction action) {
-        var bus = busResolver.apply(action.bus()).orElse(null);
-        if (bus == null) {
-            return false;
-        }
-        bus.setRedstoneOutput(action.redstoneLevel());
-        changed.run();
-        return true;
-    }
-
-    /**
-     * Returns owned resources to a network side. Used for job recovery: the owned list is the
-     * exact set being returned, so no ownership ledger is consulted.
-     */
-    public boolean returnOwned(List<FactoryResource> owned, Direction side) {
-        return pushToNetwork(side, owned, resources -> true, resources -> {
-        });
-    }
-
-    /**
-     * Pushes a complete resource list into the target's storage for the action's
-     * key channel. Every resource has been validated to belong to that channel at
-     * script parse time; the push succeeds only when the target accepts the exact
-     * full list in one shot, otherwise nothing stays inserted.
-     */
-    private boolean pushToBus(FactoryJob job, FactoryScriptAction action) {
-        var resources = action.resources();
-        if (!job.canConsumeOwned(resources)) {
-            throw new IllegalStateException("Workflow does not own bus push resources");
-        }
-        if (resources.isEmpty()) {
-            return true;
-        }
-        var target = resolvedTarget(action.bus());
-        var storage = target == null ? null : target.storage(action.channel());
-        if (storage == null || !canInsertAll(storage, resources)) {
-            return false;
-        }
-        if (!cache.removeAll(resources)) {
-            return false;
-        }
-        var inserted = new ArrayList<FactoryResource>();
-        for (var resource : resources) {
-            var amount = storage.insert(
-                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
-            if (amount > 0) {
-                inserted.add(new FactoryResource(resource.key(), amount));
-            }
-            if (amount != resource.amount()) {
-                return recoverPartialBusPush(storage, resources, inserted);
-            }
-        }
-        job.consumeOwned(resources);
-        changed.run();
-        return true;
-    }
-
-    /**
-     * One attempt of a blocking till-full bus push: inserts as much as the target
-     * accepts for the action's key channel, moves that from the cache to the
-     * workflow ledger, and reports the remaining resources. Nothing is inserted
-     * when the target is unavailable; the scheduler retries the remainder on the
-     * next tick.
-     */
-    private FactoryActionResult pushTillFullToBus(FactoryJob job, FactoryScriptAction action) {
-        var resources = action.resources();
-        if (!job.canConsumeOwned(resources)) {
-            throw new IllegalStateException("Workflow does not own bus push resources");
-        }
-        var target = resolvedTarget(action.bus());
-        var storage = target == null ? null : target.storage(action.channel());
-        if (storage == null) {
-            return FactoryActionResult.remaining(resources);
-        }
-        var inserted = new ArrayList<FactoryResource>();
-        for (var resource : resources) {
-            var amount = storage.insert(
-                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
-            if (amount > 0) {
-                inserted.add(new FactoryResource(resource.key(), amount));
-            }
-        }
-        if (!inserted.isEmpty() && !cache.removeAll(inserted)) {
-            rollbackBusInsertion(storage, inserted);
-            return FactoryActionResult.remaining(resources);
-        }
-        if (!inserted.isEmpty()) {
-            job.consumeOwned(inserted);
-            changed.run();
-        }
-        return FactoryActionResult.remaining(subtract(resources, inserted));
-    }
-
-    /**
-     * Extracts everything the target currently exposes for the action's key
-     * channel and hands it to the workflow as owned resources. The target's full
-     * channel contents are simulated against the cache first; when the cache
-     * cannot store them all, nothing is extracted.
-     */
-    private List<FactoryResource> extractFromBus(
-            FactoryJob job, FactoryScriptAction action) {
-        var target = resolvedTarget(action.bus());
-        var storage = target == null ? null : target.storage(action.channel());
-        if (storage == null) {
-            return List.of();
-        }
-        var amounts = new KeyCounter();
-        storage.getAvailableStacks(amounts);
-        var available = new ArrayList<FactoryResource>();
-        for (var entry : amounts) {
-            if (entry.getLongValue() > 0) {
-                available.add(new FactoryResource(entry.getKey(), entry.getLongValue()));
-            }
-        }
-        if (available.isEmpty() || !cache.canStoreAll(available)) {
-            return List.of();
-        }
-        var extracted = new ArrayList<FactoryResource>();
-        for (var resource : available) {
-            var amount = storage.extract(
-                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
-            if (amount > 0) {
-                extracted.add(new FactoryResource(resource.key(), amount));
-            }
-        }
-        if (extracted.isEmpty()) {
-            return List.of();
-        }
-        if (!cache.storeAll(extracted)) {
-            rollbackBusInsertion(storage, extracted);
-            return List.of();
-        }
-        job.addOwned(extracted);
-        changed.run();
-        return List.copyOf(extracted);
-    }
-
-    private FactoryBusTarget resolvedTarget(FactoryBusAddress address) {
-        var bus = busResolver.apply(address).orElse(null);
-        return bus == null ? null : bus.target().orElse(null);
-    }
-
-    private void restoreCacheOrThrow(
-            List<FactoryResource> resources, String operation, RuntimeException cause) {
-        if (!cache.storeAll(resources)) {
-            var failure = new IllegalStateException(
-                    "Factory cache could not restore resources after failed " + operation, cause);
-            throw failure;
-        }
-        if (cause != null) {
-            throw cause;
-        }
-    }
-
-    /**
-     * Restores the cache after a partial exact bus push: re-extracts what was
-     * inserted and folds the never-inserted remainder back in. Returns false so
-     * the blocking action retries on the next tick.
-     */
-    private boolean recoverPartialBusPush(
-            MEStorage storage,
-            List<FactoryResource> requested,
-            List<FactoryResource> inserted) {
-        var recovered = new ArrayList<FactoryResource>();
-        for (var resource : inserted) {
-            var amount = storage.extract(
-                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
-            if (amount > 0) {
-                recovered.add(new FactoryResource(resource.key(), amount));
-            }
-        }
-        recovered.addAll(subtract(requested, inserted));
-        if (!cache.storeAll(recovered)) {
-            throw new IllegalStateException("Cannot restore a partially rejected bus push");
-        }
-        var lost = subtract(requested, recovered);
-        if (!lost.isEmpty()) {
-            throw new IllegalStateException("External storage violated insertion simulation");
-        }
-        return false;
-    }
-
-    /** Returns the inserted resources back to the target after a failed transfer. */
-    private static void rollbackBusInsertion(MEStorage storage, List<FactoryResource> inserted) {
-        for (var resource : inserted) {
-            var extracted = storage.extract(
-                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
-            if (extracted != resource.amount()) {
-                throw new IllegalStateException(
-                        "Cannot roll back partial external storage insertion");
-            }
-        }
-    }
-
-    private boolean pushToNetwork(
-            Direction side,
-            List<FactoryResource> resources,
-            Predicate<List<FactoryResource>> canConsume,
-            Consumer<List<FactoryResource>> consume) {
-        if (!canConsume.test(resources)) {
-            throw new IllegalStateException("Workflow does not own network push resources");
-        }
-        if (resources.isEmpty()) {
-            return true;
-        }
-        var target = networkResolver.resolve(side).orElse(null);
-        if (target == null || !canInsertAll(target, resources)) {
-            return false;
-        }
-        if (!cache.removeAll(resources)) {
-            return false;
-        }
-        var inserted = new ArrayList<FactoryResource>();
-        for (var resource : resources) {
-            var amount = target.storage.insert(
-                    resource.key(), resource.amount(), Actionable.MODULATE, target.source);
-            if (amount > 0) {
-                inserted.add(new FactoryResource(resource.key(), amount));
-            }
-            if (amount != resource.amount()) {
-                return recoverPartialNetworkPush(target, resources, inserted, consume);
-            }
-        }
-        consume.accept(resources);
-        changed.run();
-        return true;
-    }
-
-    /**
-     * One attempt of a blocking till-full network push: inserts as much as the
-     * network accepts and reports the remaining resources. The scheduler retries
-     * the remainder on the next tick.
-     */
-    private FactoryActionResult pushTillFullToNetwork(FactoryJob job, FactoryScriptAction action) {
-        var resources = action.resources();
-        if (!job.canConsumeOwned(resources)) {
-            throw new IllegalStateException("Workflow does not own network push resources");
-        }
-        var endpoint = networkResolver.resolve(action.networkSide()).orElse(null);
-        if (endpoint == null) {
-            return FactoryActionResult.remaining(resources);
-        }
-        var inserted = new ArrayList<FactoryResource>();
-        for (var resource : resources) {
-            var amount = endpoint.storage().insert(
-                    resource.key(), resource.amount(), Actionable.MODULATE, endpoint.source());
-            if (amount > 0) {
-                inserted.add(new FactoryResource(resource.key(), amount));
-            }
-        }
-        if (!inserted.isEmpty() && !cache.removeAll(inserted)) {
-            for (var resource : inserted) {
-                endpoint.storage().extract(
-                        resource.key(), resource.amount(), Actionable.MODULATE, endpoint.source());
-            }
-            return FactoryActionResult.remaining(resources);
-        }
-        if (!inserted.isEmpty()) {
-            job.consumeOwned(inserted);
-            changed.run();
-        }
-        return FactoryActionResult.remaining(subtract(resources, inserted));
-    }
-
-    private boolean recoverPartialNetworkPush(
-            NetworkEndpoint target,
-            List<FactoryResource> requested,
-            List<FactoryResource> inserted,
-            Consumer<List<FactoryResource>> consume) {
-        var recovered = new ArrayList<FactoryResource>();
-        for (var resource : inserted) {
-            var amount = target.storage.extract(
-                    resource.key(), resource.amount(), Actionable.MODULATE, target.source);
-            if (amount > 0) {
-                recovered.add(new FactoryResource(resource.key(), amount));
-            }
-        }
-        recovered.addAll(subtract(requested, inserted));
-        if (!cache.storeAll(recovered)) {
-            throw new IllegalStateException("Cannot restore a partially rejected network push");
-        }
-        var lost = subtract(requested, recovered);
-        if (!lost.isEmpty()) {
-            consume.accept(lost);
-            throw new IllegalStateException("AE storage violated insertion simulation");
-        }
-        return false;
-    }
-
-    private List<FactoryResource> extractFromNetwork(
-            FactoryJob job, Direction side, List<FactoryResource> requested) {
-        var source = networkResolver.resolve(side).orElse(null);
-        if (source == null || !canExtractAll(source, requested)
-                || !cache.canStoreAll(requested)) {
-            return List.of();
-        }
-        var extracted = new ArrayList<FactoryResource>();
-        for (var resource : requested) {
-            var amount = source.storage.extract(
-                    resource.key(), resource.amount(), Actionable.MODULATE, source.source);
-            if (amount > 0) {
-                extracted.add(new FactoryResource(resource.key(), amount));
-            }
-            if (amount != resource.amount()) {
-                rollbackNetworkExtraction(source, extracted);
+            collect(network.storage(), amounts);
+        } else {
+            var bus = busResolver.resolve(endpoint.bus()).orElse(null);
+            if (bus == null) {
                 return List.of();
             }
-        }
-        if (!cache.storeAll(extracted)) {
-            rollbackNetworkExtraction(source, extracted);
-            return List.of();
-        }
-        job.addOwned(extracted);
-        changed.run();
-        return List.copyOf(extracted);
-    }
-
-    private static void rollbackNetworkExtraction(
-            NetworkEndpoint storage, List<FactoryResource> extracted) {
-        for (var resource : extracted) {
-            var inserted = storage.storage.insert(
-                    resource.key(), resource.amount(), Actionable.MODULATE, storage.source);
-            if (inserted != resource.amount()) {
-                throw new IllegalStateException("Cannot roll back partial AE network extraction");
+            for (var channel : bus.channels()) {
+                var storage = bus.storage(channel);
+                if (storage != null) {
+                    collect(storage, amounts);
+                }
             }
         }
-    }
-
-    private static boolean canInsertAll(
-            NetworkEndpoint storage, List<FactoryResource> resources) {
-        return resources.stream().allMatch(resource -> storage.storage.insert(
-                resource.key(), resource.amount(), Actionable.SIMULATE, storage.source)
-                == resource.amount());
-    }
-
-    private static boolean canInsertAll(
-            MEStorage storage, List<FactoryResource> resources) {
-        return resources.stream().allMatch(resource -> storage.insert(
-                resource.key(), resource.amount(), Actionable.SIMULATE, BUS_SOURCE)
-                == resource.amount());
-    }
-
-    private static boolean canExtractAll(
-            NetworkEndpoint storage, List<FactoryResource> resources) {
-        return resources.stream().allMatch(resource -> storage.storage.extract(
-                resource.key(), resource.amount(), Actionable.SIMULATE, storage.source)
-                == resource.amount());
-    }
-
-    private static List<FactoryResource> resources(List<ItemStack> stacks) {
-        var amounts = new LinkedHashMap<AEKey, Long>();
-        for (var stack : stacks) {
-            if (!stack.isEmpty()) {
-                amounts.merge(AEItemKey.of(stack), (long) stack.getCount(), Math::addExact);
-            }
-        }
-        return fromAmounts(amounts);
-    }
-
-    private static List<ItemStack> toItemStacks(List<FactoryResource> resources) {
-        var result = new ArrayList<ItemStack>();
-        for (var resource : resources) {
-            if (!(resource.key() instanceof AEItemKey itemKey)) {
-                return null;
-            }
-            var remaining = resource.amount();
-            while (remaining > 0) {
-                var amount = (int) Math.min(remaining, itemKey.getMaxStackSize());
-                result.add(itemKey.toStack(amount));
-                remaining -= amount;
-            }
-        }
-        return List.copyOf(result);
-    }
-
-    private static List<FactoryResource> subtract(
-            List<FactoryResource> current, List<FactoryResource> removed) {
-        var amounts = new LinkedHashMap<AEKey, Long>();
-        for (var resource : current) {
-            amounts.merge(resource.key(), resource.amount(), Math::addExact);
-        }
-        for (var resource : removed) {
-            var remaining = amounts.getOrDefault(resource.key(), 0L) - resource.amount();
-            if (remaining < 0) {
-                throw new IllegalStateException("Resource subtraction underflow");
-            }
-            amounts.put(resource.key(), remaining);
-        }
-        return fromAmounts(amounts);
-    }
-
-    private static List<FactoryResource> fromAmounts(LinkedHashMap<AEKey, Long> amounts) {
         return amounts.entrySet().stream()
                 .filter(entry -> entry.getValue() > 0)
                 .map(entry -> new FactoryResource(entry.getKey(), entry.getValue()))
                 .toList();
+    }
+
+    public long available(FactoryResourceOrigin origin, AEKey key) {
+        var access = source(origin, key);
+        return access == null ? 0 : access.extract(key, Long.MAX_VALUE, true);
+    }
+
+    /** Tries to return one orphaned order allocation to its preferred network. */
+    public boolean recoverEscrow(UUID allocationId) {
+        var resources = escrow.contents(allocationId);
+        if (resources.isEmpty()) {
+            escrow.remove(allocationId);
+            return true;
+        }
+        var side = escrow.recoverySide(allocationId);
+        if (side == null) {
+            return false;
+        }
+        var result = perform(allocationId, new FactoryTransferAction(
+                FactoryResourceOrigin.escrow(allocationId),
+                FactoryEndpoint.network(side),
+                resources,
+                FactoryTransferAction.Mode.PARTIAL));
+        if (result.completed()) {
+            escrow.remove(allocationId);
+        }
+        return result.completed();
+    }
+
+    private FactoryTransferResult exact(UUID workflowId, FactoryTransferAction action) {
+        for (var resource : action.remaining()) {
+            var source = source(action.source(), resource.key());
+            var target = target(action.target(), resource.key());
+            if (source == null || target == null
+                    || source.extract(resource.key(), resource.amount(), true) != resource.amount()
+                    || target.insert(resource.key(), resource.amount(), true) != resource.amount()) {
+                return FactoryTransferResult.waiting(action.remaining());
+            }
+        }
+
+        var extracted = new ArrayList<FactoryResource>();
+        for (var resource : action.remaining()) {
+            var source = source(action.source(), resource.key());
+            var amount = source.extract(resource.key(), resource.amount(), false);
+            if (amount > 0) {
+                extracted.add(new FactoryResource(resource.key(), amount));
+            }
+            if (amount != resource.amount()) {
+                restoreSource(workflowId, action, extracted);
+                return FactoryTransferResult.waiting(action.remaining());
+            }
+        }
+
+        var inserted = new ArrayList<FactoryResource>();
+        for (var resource : extracted) {
+            var target = target(action.target(), resource.key());
+            var amount = target.insert(resource.key(), resource.amount(), false);
+            if (amount > 0) {
+                inserted.add(new FactoryResource(resource.key(), amount));
+            }
+            if (amount != resource.amount()) {
+                rollbackExactTarget(workflowId, action, extracted, inserted);
+                return FactoryTransferResult.waiting(action.remaining());
+            }
+        }
+        changed.run();
+        return FactoryTransferResult.complete();
+    }
+
+    private FactoryTransferResult partial(UUID workflowId, FactoryTransferAction action) {
+        var moved = new ArrayList<FactoryResource>();
+        for (var resource : action.remaining()) {
+            var source = source(action.source(), resource.key());
+            var target = target(action.target(), resource.key());
+            if (source == null || target == null) {
+                continue;
+            }
+            var available = source.extract(resource.key(), resource.amount(), true);
+            if (available <= 0) {
+                continue;
+            }
+            var capacity = target.insert(resource.key(), available, true);
+            var planned = Math.min(available, capacity);
+            if (planned <= 0) {
+                continue;
+            }
+            var extracted = source.extract(resource.key(), planned, false);
+            if (extracted <= 0) {
+                continue;
+            }
+            var inserted = target.insert(resource.key(), extracted, false);
+            if (inserted > 0) {
+                moved.add(new FactoryResource(resource.key(), inserted));
+            }
+            if (inserted < extracted) {
+                restoreOrEscrow(workflowId, action, resource.key(), extracted - inserted);
+            }
+        }
+        if (moved.isEmpty()) {
+            return FactoryTransferResult.waiting(action.remaining());
+        }
+        changed.run();
+        var remaining = FactoryResourceRef.subtract(action.remaining(), moved);
+        return remaining.isEmpty()
+                ? FactoryTransferResult.complete()
+                : FactoryTransferResult.waiting(remaining);
+    }
+
+    private void rollbackExactTarget(
+            UUID workflowId,
+            FactoryTransferAction action,
+            List<FactoryResource> extracted,
+            List<FactoryResource> inserted) {
+        var recovered = new ArrayList<FactoryResource>();
+        for (var resource : inserted) {
+            var target = target(action.target(), resource.key());
+            var amount = target.extract(resource.key(), resource.amount(), false);
+            if (amount > 0) {
+                recovered.add(new FactoryResource(resource.key(), amount));
+            }
+        }
+        recovered.addAll(FactoryResourceRef.subtract(extracted, inserted));
+        restoreSource(workflowId, action, recovered);
+        var stranded = FactoryResourceRef.subtract(extracted, recovered);
+        if (!stranded.isEmpty()) {
+            throw new IllegalStateException(
+                    "Target storage violated exact-transfer simulation; resources remain at target");
+        }
+    }
+
+    private void restoreSource(
+            UUID workflowId,
+            FactoryTransferAction action,
+            List<FactoryResource> resources) {
+        var failed = new ArrayList<FactoryResource>();
+        for (var resource : resources) {
+            var source = source(action.source(), resource.key());
+            var restored = source == null
+                    ? 0
+                    : source.insert(resource.key(), resource.amount(), false);
+            if (restored < resource.amount()) {
+                failed.add(new FactoryResource(resource.key(), resource.amount() - restored));
+            }
+        }
+        if (!failed.isEmpty()) {
+            escrow.recover(workflowId, recoverySide(action), failed);
+            throw new IllegalStateException(
+                    "Source rejected rollback; resources moved to recovery escrow");
+        }
+    }
+
+    private void restoreOrEscrow(
+            UUID workflowId,
+            FactoryTransferAction action,
+            AEKey key,
+            long amount) {
+        var source = source(action.source(), key);
+        var restored = source == null ? 0 : source.insert(key, amount, false);
+        if (restored < amount) {
+            escrow.recover(workflowId, recoverySide(action),
+                    List.of(new FactoryResource(key, amount - restored)));
+            throw new IllegalStateException(
+                    "Source rejected rollback; resources moved to recovery escrow");
+        }
+    }
+
+    private Direction recoverySide(FactoryTransferAction action) {
+        if (action.source().kind() == FactoryResourceOrigin.Kind.ESCROW) {
+            var side = escrow.recoverySide(action.source().escrowId());
+            if (side != null) {
+                return side;
+            }
+        }
+        if (action.source().endpoint() != null
+                && action.source().endpoint().kind() == FactoryEndpoint.Kind.NETWORK) {
+            return action.source().endpoint().networkSide();
+        }
+        if (action.target().kind() == FactoryEndpoint.Kind.NETWORK) {
+            return action.target().networkSide();
+        }
+        return Direction.NORTH;
+    }
+
+    private StorageAccess source(FactoryResourceOrigin origin, AEKey key) {
+        if (origin.kind() == FactoryResourceOrigin.Kind.ESCROW) {
+            return new EscrowAccess(origin.escrowId());
+        }
+        return endpoint(origin.endpoint(), key);
+    }
+
+    private StorageAccess target(FactoryEndpoint endpoint, AEKey key) {
+        return endpoint(endpoint, key);
+    }
+
+    private StorageAccess endpoint(FactoryEndpoint endpoint, AEKey key) {
+        if (endpoint.kind() == FactoryEndpoint.Kind.NETWORK) {
+            var resolved = networkResolver.resolve(endpoint.networkSide()).orElse(null);
+            return resolved == null
+                    ? null
+                    : new MeStorageAccess(resolved.storage(), resolved.source());
+        }
+        var bus = busResolver.resolve(endpoint.bus()).orElse(null);
+        if (bus == null) {
+            return null;
+        }
+        var storage = bus.storage(key.getType());
+        return storage == null ? null : new MeStorageAccess(storage, BUS_SOURCE);
+    }
+
+    private static void collect(MEStorage storage, LinkedHashMap<AEKey, Long> amounts) {
+        var available = new KeyCounter();
+        storage.getAvailableStacks(available);
+        for (var entry : available) {
+            if (entry.getLongValue() > 0) {
+                amounts.merge(entry.getKey(), entry.getLongValue(), Math::addExact);
+            }
+        }
+    }
+
+    private interface StorageAccess {
+        long extract(AEKey key, long amount, boolean simulate);
+
+        long insert(AEKey key, long amount, boolean simulate);
+    }
+
+    private record MeStorageAccess(MEStorage storage, IActionSource source)
+            implements StorageAccess {
+        @Override
+        public long extract(AEKey key, long amount, boolean simulate) {
+            return storage.extract(key, amount,
+                    simulate ? Actionable.SIMULATE : Actionable.MODULATE, source);
+        }
+
+        @Override
+        public long insert(AEKey key, long amount, boolean simulate) {
+            return storage.insert(key, amount,
+                    simulate ? Actionable.SIMULATE : Actionable.MODULATE, source);
+        }
+    }
+
+    private final class EscrowAccess implements StorageAccess {
+        private final UUID allocationId;
+
+        private EscrowAccess(UUID allocationId) {
+            this.allocationId = allocationId;
+        }
+
+        @Override
+        public long extract(AEKey key, long amount, boolean simulate) {
+            return escrow.extract(allocationId, key, amount, simulate);
+        }
+
+        @Override
+        public long insert(AEKey key, long amount, boolean simulate) {
+            return simulate ? amount : escrow.insert(allocationId, key, amount);
+        }
+    }
+
+    @FunctionalInterface
+    public interface BusResolver {
+        Optional<FactoryBusTarget> resolve(FactoryBusAddress address);
     }
 
     @FunctionalInterface

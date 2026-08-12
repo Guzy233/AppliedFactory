@@ -191,8 +191,8 @@ public final class FactoryBusPart
 
     /**
      * AE2 forwards cable neighbor changes to its parts. When the block this bus targets changed,
-     * tell the controllers on our grid so their initializer re-runs — this replaces the bus-set
-     * and machine-info part of the old per-tick topology fingerprint.
+     * tell the controllers on our grid so their network.onChange callbacks run — this replaces
+     * the bus-set and machine-info part of the old per-tick topology fingerprint.
      */
     @Override
     public void onNeighborChanged(BlockGetter level, BlockPos pos, BlockPos neighbor) {
@@ -350,10 +350,6 @@ public final class FactoryBusPart
     }
 
     @Nullable
-    public BlockEntity hostBlockEntityForDiagnostics() {
-        return hostBlockEntity;
-    }
-
     @Override
     public boolean onUseWithoutItem(Player player, Vec3 pos) {
         if (!player.level().isClientSide && player instanceof ServerPlayer serverPlayer && side != null) {

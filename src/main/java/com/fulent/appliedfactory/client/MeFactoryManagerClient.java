@@ -14,7 +14,6 @@ public final class MeFactoryManagerClient {
     }
 
     private void registerScreens(RegisterMenuScreensEvent event) {
-        event.register(AppliedFactory.FACTORY_CONTROLLER_MENU.get(), FactoryControllerScreen::new);
         event.register(AppliedFactory.FACTORY_CONTROLLER_PROGRAM_MENU.get(),
                 FactoryControllerProgramScreen::new);
         event.register(AppliedFactory.FACTORY_BUS_MENU.get(), FactoryBusScreen::new);

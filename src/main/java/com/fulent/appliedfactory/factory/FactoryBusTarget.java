@@ -288,7 +288,7 @@ public final class FactoryBusTarget {
      */
     @Nullable
     public MEStorage storage(AEKeyType type) {
-        if (!(level instanceof ServerLevel serverLevel)) {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
             return null;
         }
         var strategy = strategies(serverLevel).get(type);
@@ -296,11 +296,10 @@ public final class FactoryBusTarget {
     }
 
     /**
-     * The key channels this target face currently exposes. Used by the controller
-     * topology fingerprint so a capability set change re-runs initializers.
+     * The key channels this target face currently exposes.
      */
     public Set<AEKeyType> channels() {
-        if (!(level instanceof ServerLevel serverLevel)) {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
             return Set.of();
         }
         var result = new LinkedHashSet<AEKeyType>();

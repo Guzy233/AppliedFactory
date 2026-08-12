@@ -1,920 +1,284 @@
-# Applied Factory 脚本 API 设计
+# Applied Factory 脚本 API
 
-> 状态：第一阶段实现契约。本文只约束脚本可见行为，不规定 Java 内部实现。
+> 状态：破坏性重构后的 MVP 契约。旧 `ctx` API、Rhino continuation、任务调用栈持久化和玩家安装的缓存元件均不再兼容。
 
-## 1. 第一阶段原则
+## 1. 运行模型
 
-第一阶段只实现已经有明确用途的能力：
-
-- 枚举控制器可见的所有工厂总线；
-- 用普通 JavaScript 读取、筛选和组合 Bus；
-- 向一个确定端点精确推送完整资源；
-- 从一个 Bus 无条件提取当前可提取的全部资源；
-- 区分下单网络和脚本选择的执行网络；
-- 让 initializer 只监听声明的一个或多个网络；
-- 用 `sleep` 编写需要等待或重选的流程；
-- 把被动产线注册为由 `sleep` 自行控制节奏的长期函数；
-- 注册脚本样板和控制器通用 handler。
-
-暂不设计部分传输结果、失败原因枚举、机器池、租约、自动重试或原生筛选 DSL。没有实际脚本证明其必要性之前，不把这些需求固化进 API。
-
-## 2. 顶层注册 API
-
-程序求值时可以调用：
-
-```ts
-initialize(definition)
-registerPatterns(definition)
-registerControllerHandler(definition)
-registerPassive(handler)
-```
-
-对应三类 workflow：
-
-1. `registerPatterns`：批量注册脚本样板，每个样板有自己的 handler；
-2. `registerControllerHandler`：处理控制器实体槽内的全部 AE processing pattern；
-3. `registerPassive`：注册一个启动一次且预期不返回的被动产线函数。
-
-`initialize` 声明它依赖的网络，并只在这些网络的拓扑变化时重建脚本缓存。
-
-源码成功保存后产生新的 program revision。已经接受的 processing 任务继续使用启动时的源码和 continuation；长期被动产线不跨 revision 永久保留，而是在安全挂起点停止并完成资源保全，新 initializer 成功后再启动新 revision 注册的产线。新旧被动产线不会同时运行。
-
-## 3. 下单网络与执行网络
-
-下单网络和执行网络是两个不同概念：
-
-- 下单网络决定哪个 AE 网络能够看到样板并提交 crafting job；
-- 执行网络由 handler 在运行时选择，决定使用哪一侧网络及其工厂总线；
-- 一个 handler 可以同时访问多个执行网络；
-- 输出通常送回下单网络，但 API 不强制这样做。
-
-### 3.1 指定下单网络
-
-脚本样板注册时明确指定控制器面：
+控制器脚本使用 Rhino ES6 编译模式。脚本在控制器加载时求值一次，用全局函数取得句柄、注册 processing pattern，并启动 generator workflow。
 
 ```js
-registerPatterns({
-  orderNetwork: "north",
-  patterns: [
-    {
-      id: "iron",
-      inputs: [item("minecraft:iron_ore", 1)],
-      outputs: [item("minecraft:iron_ingot", 1)],
-      handler: smelt
-    },
-    {
-      id: "gold",
-      inputs: [item("minecraft:gold_ore", 1)],
-      outputs: [item("minecraft:gold_ingot", 1)],
-      handler: smelt
+const production = network("south");
+
+registerProcessingPattern(
+    [{
+        id: "iron",
+        orderNetwork: "north",
+        inputs: [item("minecraft:iron_ore", 1)],
+        outputs: [item("minecraft:iron_ingot", 1)]
+    }],
+    function* (order) {
+        const furnace = production.buses.find(bus =>
+            bus.target !== null && bus.target.id === "minecraft:furnace"
+        );
+
+        yield order.input.pushExactlyInto(furnace);
+        yield sleep(200);
+        yield furnace.extract().to(order.network);
     }
-  ]
+);
+```
+
+`yield` 是 JavaScript generator 的普通语义，不是 Rhino continuation。Java 调度器反复调用 generator 的 `next(result)`：
+
+- generator 产出 `Action` 时，任务等待该 Action；
+- Action 成功后，其结果通过下一次 `next(result)` 返回给脚本；
+- `done === true` 时任务结束；
+- generator 抛出异常时任务失败。
+
+generator 只存在于当前 JVM 内存中，不序列化。服务器重启或脚本重载会终止正在运行的 workflow。processing job 的剩余托管资源进入恢复流程；被动 workflow 从入口重新启动。
+
+## 2. 全局 API
+
+MVP 不再把方法集中在 `ctx` 上。
+
+```ts
+network(side: Direction): Network
+sleep(ticks: number): SleepAction
+go(factory: () => Generator<Action, unknown, unknown>): void
+
+registerProcessingPattern(
+    patterns: readonly PatternDefinition[],
+    handler: (order: Order) => Generator<Action, unknown, unknown>
+): void
+
+item(id: string, amount: number): ResourceSpec
+stack(channel: string, id: string, amount: number): ResourceSpec
+stackTag(serializedKey: string, amount: number): ResourceSpec
+```
+
+`go(function* () { ... })` 注册一条被动 workflow。顶层脚本本身不是 generator，因此不能在顶层直接写 `yield`。
+
+```js
+go(function* () {
+    while (true) {
+        const remaining = network("east")
+            .extract(item("minecraft:coal", -1))
+            .to(bus)
+            .now();
+        yield sleep(1);
+    }
 });
 ```
 
-```ts
-interface PatternRegistration {
-  readonly orderNetwork: Direction;
-  readonly patterns: readonly ScriptPatternDefinition[];
-}
-```
+## 3. 句柄
 
-同一批注册的样板只向 `orderNetwork` 对应的控制器 AE 节点发布。需要发布到另一网络时再次调用 `registerPatterns`。
+`Network`、`Bus`、存储端点和资源来源都只持有稳定地址，不持有 `BlockEntity`、AE grid、capability 或 `MEStorage` 实例。每次查询和 Action 执行时重新解析地址。
 
-控制器实体样板槽也明确指定发布网络：
+Bus 句柄只绑定总线地址，不保存目标机器身份：
 
-```js
-registerControllerHandler({
-  orderNetwork: "north",
-  handler: smelt
-});
-```
+- 原位替换机器后，同一个 Bus 句柄会操作总线当前面对的新机器；
+- 暂时离线、区块未加载或当前目标没有对应存储：Action 等待；
+- 资源不足或目标已满：Action 等待；
+- 总线本身被拆除：句柄无法解析，Action 等待。
 
-```ts
-interface ControllerHandlerDefinition {
-  readonly orderNetwork: Direction;
-  readonly handler: (ctx: ProcessingContext) => void;
-}
-```
-
-### 3.2 取得执行网络
-
-```ts
-ctx.network(side: Direction): Network
-```
-
-handler 可以显式取得任意控制器面连接的网络：
-
-```js
-const production = ctx.network("south");
-if (!production.online()) {
-  ctx.fail("Production network is offline");
-}
-```
-
-控制器六个物理面始终各自拥有一个 `Network` 句柄；未接线、无频道或未供电由 `online() === false` 表示，而不是返回 `null`。initializer 中访问未列入 `initialize.networks` 的 side 仍会抛出脚本错误。
-
-processing handler 还拥有：
-
-```ts
-ctx.orderNetwork: Network
-```
-
-它表示实际接收该样板并提交本次任务的网络。于是主网下单、子网生产可以直接写成：
-
-```js
-const production = ctx.network("south");
-const productionBuses = production.buses;
-
-// 使用子网中的 Bus 执行生产。
-// 最后把产物送回主网。
-ctx.orderNetwork.items().push(products);
-```
-
-`ctx.network(side)` 是按控制器物理面寻址，不是 Bus 筛选函数。控制器各面仍是独立 AE 节点，访问它们不会桥接频道。
-
-## 4. Context
-
-```ts
-type Direction = "up" | "down" | "north" | "south" | "west" | "east";
-
-interface BaseContext {
-  readonly tick: number;
-  readonly buses: readonly Bus[];
-  // 当前 workflow 仍持有的全部资源，可用于重新取得丢失的局部变量。
-  readonly owned: readonly OwnedResource[];
-
-  network(side: Direction): Network;
-  sleep(ticks: number): void;
-  yield(): void;
-  fail(message: string): never;
-  log(message: string): void;
-}
-
-interface ProcessingContext extends BaseContext {
-  readonly orderNetwork: Network;
-  readonly inputs: readonly OwnedResource[];
-  readonly outputs: readonly Resource[];
-}
-
-interface PassiveContext extends BaseContext {
-}
-
-interface InitializeContext {
-  readonly tick: number;
-  // 仅为 initializer 声明监听的网络并集。
-  readonly buses: readonly Bus[];
-
-  // 只能访问 initializer 声明监听的 side。
-  network(side: Direction): Network;
-  log(message: string): void;
-}
-```
-
-`ctx.sleep(n)` 持久化挂起当前 workflow，至少经过 `n` 个服务器 tick 后从调用点继续。局部变量保存在 Rhino continuation 中。`ctx.yield()` 等价于 `ctx.sleep(1)`。
-
-initializer 只能读取其声明监听的 Bus 和 Network 拓扑，不能转移资源、修改世界或挂起。访问未声明的网络属于脚本错误，防止缓存具有未被监听的隐式依赖。
-
-## 5. Bus 枚举
-
-### 5.1 `ctx.buses`
-
-普通 processing/passive context 中，`ctx.buses` 是控制器当前所有已连接网络中可见 Bus 的并集：
-
-```js
-const buses = ctx.buses;
-```
-
-每次读取返回当前目录的独立、有序数组快照。脚本修改这个数组只影响本地快照，保存在局部变量中的旧数组也不会自动变化：
-
-```js
-const before = ctx.buses;
-ctx.sleep(20);
-const after = ctx.buses;
-```
-
-initializer 是例外：其中的 `ctx.buses` 只包含 `initialize.networks` 声明的网络，见第 6 节。
-
-使用 JavaScript 自带方法筛选：
-
-```js
-const furnaces = ctx.buses.filter(bus => {
-  const target = bus.target();
-  return target !== null && target.id === "minecraft:furnace";
-});
-```
-
-第一阶段不存在：
-
-```ts
-// 不存在
-ctx.getMachine(...)
-ctx.getMachines(...)
-ctx.getBus(filter)
-ctx.getBuses(filter)
-```
-
-### 5.2 `network.buses`
+若脚本缓存依赖目标机器类型，玩家可以重新保存脚本，或在 `network.onChange` 回调中重新枚举 `network.buses`。MVP 不提供机器身份追踪、自动重新选择目标或机器池。
 
 ```ts
 interface Network {
-  readonly side: Direction;
-  readonly buses: readonly Bus[];
+    readonly side: Direction;
+    readonly buses: readonly Bus[];
 
-  online(): boolean;
-  // 指定 AE 资源通道的存储句柄；read/count 按该通道过滤，push/extract 作用于整个网络存储。
-  storage(channel: ResourceChannel): NetworkStorage;
-  // 物品通道存储句柄：storage("item") 的糖。
-  items(): NetworkStorage;
-  // AE2 中注册的全部 AE 通道 id（含附属通道），用于枚举网络能读写哪些资源类型。
-  channels(): readonly ResourceChannel[];
-}
-```
-
-`network.buses` 只包含该控制器面所连 AE grid 中的活动工厂总线。主网与生产子网分离时，handler 通常遍历执行网络的 `buses`，而不是 `ctx.buses` 的并集。
-
-若同一个 AE grid 同时连到控制器多个面，这些 `Network` 可以拥有相同的 Bus 集合；脚本仍按控制器面选择它们。
-
-## 6. initialize
-
-```js
-let productionLines = [];
-
-initialize({
-  networks: ["south"],
-  handler: function (ctx) {
-    productionLines = [];
-
-    const production = ctx.network("south");
-    if (production.online()) {
-      productionLines = buildLines(production.buses);
-    }
-  }
-});
-```
-
-```ts
-interface InitializerDefinition {
-  readonly networks: readonly Direction[];
-  readonly handler: (ctx: InitializeContext) => void;
-}
-```
-
-`networks` 是 initializer 的完整拓扑依赖：
-
-- 可以声明一个或多个控制器面；
-- `ctx.buses` 只合并这些网络中的 Bus；
-- `ctx.network(side)` 只能读取这些网络；
-- 未声明网络发生任何变化都不会触发该 initializer；
-- `networks: []` 表示只在程序加载或 revision 更新时运行，不监听网络拓扑。
-
-initializer 在以下情况执行：
-
-- 程序首次加载或 Rhino runtime 重建；
-- 控制器保存新 revision；
-- 声明监听的控制器面所连 AE grid 改变；
-- 声明监听的网络内，工厂总线上下线、换 host、换面或改变可见性；
-- 声明监听的网络内，相邻目标方块被替换，或可访问 capability 类型发生结构性变化。
-
-例如 initializer 只声明 `south` 时，主网 `north` 的频道、Bus 或拓扑变化不会让生产子网重新初始化。
-
-若同一个底层 AE grid 同时连接已监听面和未监听面，该 grid 的结构变化仍会通过已监听面触发初始化。
-
-物品数量、机器忙闲、红石值和普通 BlockState 属性变化不属于拓扑变化。动态条件应在 handler 中重新读取。
-
-初始化不是事务。已执行的赋值不会因后续异常回滚，因此建议先清空缓存，再重新构造。
-
-## 7. Bus 地址与读取
-
-```ts
-interface FactoryBusAddress {
-  readonly dimension: string;
-  readonly hostX: number;
-  readonly hostY: number;
-  readonly hostZ: number;
-  readonly partSide: Direction;
-  readonly key: string;
+    readonly online: boolean;
+    onChange(callback: () => void): void;
+    extract(spec?: ResourceSpec): Resource;
 }
 
-interface BlockAddress {
-  readonly dimension: string;
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
-  readonly key: string;
-}
-```
-
-- `FactoryBusAddress` 定位 multipart host 上的工厂总线 part；
-- `partSide` 从 host 指向相邻目标方块；
-- `BlockAddress` 是相邻目标方块的位置；
-- `targetFace` 是目标方块被访问的面，即 `partSide` 的反方向；
-- 地址相等使用 `.key`，不使用 JavaScript 对象引用 `===`。
-
-```ts
 interface Bus {
-  readonly address: FactoryBusAddress;
-  readonly targetAddress: BlockAddress;
-  readonly targetFace: Direction;
+    readonly target: BlockView | null;
+    readonly targetFace: Direction;
 
-  exists(): boolean;
-  state(): BusState | null;
-  target(): BlockView | null;
-  // 指定 AE 资源通道的存储句柄；目标方块没有该通道存储时返回 null。
-  storage(channel: ResourceChannel): BusStorage | null;
-  // 物品通道存储句柄：storage("item") 的糖。
-  items(): BusStorage | null;
-  // 该 bus 目标当前暴露的 AE 通道 id（已注册世界存储策略的通道，按能力探测）。
-  channels(): readonly ResourceChannel[];
-
-  detect(selector: string): boolean;
-  drop(resources: OwnedResource | readonly OwnedResource[]): boolean;
-  use(): boolean;
-  place(resource: OwnedResource): boolean;
-  break(): readonly OwnedResource[];
-  redstone(level: number): boolean;
+    readonly exists: boolean;
+    extract(spec?: ResourceSpec): Resource;
 }
 ```
 
-Bus 句柄内部只保留地址。`exists`、`state`、`target` 和 `items` 每次都重新解析当前世界，不持有旧 `BlockEntity` 或 capability。
+`network.buses` 每次读取均返回当前拓扑快照。`onChange` 注册同步、不可挂起的拓扑变化回调；回调中可以重建脚本保存的句柄数组，但不能 `yield`。
 
-### 7.1 世界操作与红石输出
+## 4. Resource
 
-`detect(selector)` 同步检测总线当前目标方块；参数可为方块 ID 或 `#` 开头的方块标签。目标不存在、所在区块未加载或不匹配时返回 `false`。
-
-其余操作都只能在 processing/passive workflow 中调用：每次调用只执行一次，并在执行后以 `boolean` 恢复脚本。
-
-- `drop(resources)` 将完整的 owned resource 列表从总线目标面投掷为世界物品实体；成功后资源不再归 workflow 所有。
-- `use()` 由名为 `[Applied Factory]` 的空手伪玩家点击目标方块；会经过正常的服务端交互与保护兼容路径。
-- `place(resource)` 由同一伪玩家把一个 owned block item 放进空的目标位置。无论资源对象的 `amount` 多大，每次成功调用只消耗一个；目标非空气、资源不是方块物品或放置被拒绝时返回 `false`。
-- `break()` 由同一伪玩家使用内置、无附魔的钻石镐破坏当前目标方块，并把普通方块掉落捕获为 owned resources。缓存不能完整接收预估掉落时不破坏方块；若 modded loot 与预估不一致导致实际掉落无法写入缓存，掉落物会保留为世界物品实体而不是被删除。返回空数组表示目标未破坏或没有可捕获掉落。
-- `break(tool)` 用 `tool`（一个 owned 物品）作为伪玩家手持工具破坏目标方块，掉落计算遵循该工具的采掘等级、附魔和标签；工具只校验所有权、不消耗、不扣耐久。其余语义与 `break()` 一致。
-- `redstone(level)` 将这个 Factory Bus 所在物理面输出设置为 `0` 到 `15`，该值会保存并通知邻居；返回 `false` 仅表示总线已不再可访问。`bus.state().redstone` 仍是目标方块面对总线的输入信号，不是这个输出值。
-
-例如，先识别目标、再让总线作为红石执行器：
-
-```js
-if (bus.detect("minecraft:lever")) {
-  bus.use();
-} else {
-  bus.redstone(15);
-}
+```text
+Resource
+├── origin：当前资源来源句柄
+└── bundle：确定的 AEKey → amount
 ```
+
+Resource 是不可变值。它不会在创建时把普通端点中的资源提取到控制器，也不会锁定机器或网络库存。
 
 ```ts
-interface BusState {
-  readonly active: boolean;
-  readonly powered: boolean;
-  readonly redstone: number;
-  readonly upgrades: Readonly<Record<string, number>>;
-  readonly config: Readonly<Record<string, string | number | boolean | null>>;
-}
-
-interface BlockView {
-  readonly id: string;
-  readonly state: Readonly<Record<string, string>>;
-  readonly blockEntityType: string | null;
-  // 方块实体自身的 NBT 快照（不含 id/坐标元数据）；无方块实体时为 null。
-  readonly nbt: Readonly<Record<string, NbtValue>> | null;
-
-  matches(selector: string): boolean;
-}
-```
-
-`BlockView.nbt` 是 `bus.target()` 调用时刻的不可变快照，使用与 `Resource.nbt()` 相同的有界 NBT 转换。普通 BlockState 属性变化不属于拓扑变化，脚本应在 handler 中重新调用 `bus.target()`。
-
-脚本只能读取 AF 明确转换后的不可变数据，不能取得原始方块实体、capability 或 Java 反射对象。
-
-## 8. 多面方块由脚本组合
-
-Java 层不创建逻辑 Machine。需要同时具有上输入面和下输出面的方块时，脚本按 `targetAddress.key` 求交集：
-
-```js
-function buildLines(buses) {
-  const outputs = new Map();
-
-  for (const bus of buses) {
-    const target = bus.target();
-    if (target !== null
-        && target.id === "minecraft:furnace"
-        && bus.targetFace === "down"
-        && bus.items() !== null) {
-      outputs.set(bus.targetAddress.key, bus);
-    }
-  }
-
-  const lines = [];
-  for (const input of buses) {
-    const target = input.target();
-    const output = outputs.get(input.targetAddress.key);
-
-    if (target !== null
-        && target.id === "minecraft:furnace"
-        && input.targetFace === "up"
-        && input.items() !== null
-        && output !== undefined) {
-      lines.push({ input, output });
-    }
-  }
-
-  return lines;
-}
-```
-
-Bus 损坏或移动后旧句柄不会自动换地址。需要重选时，脚本重新遍历 `ctx.buses` 或 `network.buses`。
-
-## 9. 资源
-
-资源统一由 AE2 的资源通道（AEKeyType）参数化。`item` 是物品通道的糖，`stack` 接受任意已注册通道：
-
-```js
-item("minecraft:iron_ore", 1)
-item("minecraft:iron_ingot", 1)
-// 可选第三参：精确数据组件（Data Components），见下。
-item("minecraft:iron_pickaxe", 1, { "minecraft:enchantments": { levels: { "minecraft:efficiency": 5 } } })
-
-// 通用构造：stack(channel, id, amount[, nbt])
-stack("item", "minecraft:iron_ingot", 1)               // 等价 item(...)
-stack("fluid", "minecraft:water", 1000)                // 流体通道（毫桶）
-stack("ae2:f", "minecraft:lava", 1000)                 // 通道也可用 AE2 注册表 id
-// 其他 mod 注册的通道（化学品、能源元件等）：
-// stack("<mod>:<channelId>", "<resourceId>", amount[, nbt])
-```
-
-`channel` 是 AE key 类型的注册表 id（物品 `ae2:i`、流体 `ae2:f`，或任意附属注册的通道 id），也接受友好别名 `"item"` / `"fluid"`。`stack` 在样板注册和 Network 精确提取时创建不可变资源请求。不带 `nbt` 时请求的是默认组件；带 `nbt` 时请求的是携带该组件补丁的精确 AE key。
-
-`stack` 对任意已注册通道都是零代码适配：有解析器的通道（item/fluid 支持组件补丁）用解析器；没有解析器的通道回退到 AE2 通用反解 `{"id": ...}`（凡 key codec 以 `"id"` 字段存主 id 的通道，如 AppMek 化学品 `stack("appmek:chemical", "mekanism:carbon", 10)`，无需任何适配代码）。个别 key codec 字段特殊的通道（如 Applied Flux 能源用 `"type"` 字段）无法由 id 构造，改用序列化 tag：
-
-```js
-// 从探测脚本（或 resource.keyTag()）拿到精确的序列化 tag
-stackTag('{"#t":"appflux:flux",type:"FE"}', 20000)
-```
-
-`resource.keyTag()` 返回该资源精确 AE key 的通用序列化 tag（SNBT），可用 `stackTag(tag, amount)` 原样重建，适用于任意通道。这样新增资源类型时既不需要编译依赖、也不需要写 per-channel 适配类。
-
-```ts
-type ResourceChannel = string; // "item" | "fluid" | "<mod>:<channelId>"
-
-type NbtValue = string | number | boolean | readonly NbtValue[]
-    | Readonly<Record<string, NbtValue>> | null;
-
 interface Resource {
-  readonly id: string;
-  readonly amount: number;
+    readonly origin: ResourceOrigin;
+    readonly bundle: readonly ResourceAmount[];
 
-  matches(selector: string): boolean;
-  // 该资源 key 数据的只读快照：物品是 { id, count, components }，流体是流体栈存档，其他通道为空对象。
-  nbt(): Readonly<Record<string, NbtValue>>;
+    to(target: ResourceTarget): TransferAction;
+    pushExactlyInto(target: ResourceTarget): TransferAction;
 }
 
-interface OwnedResource extends Resource {
-  // 不可由脚本构造的当前 workflow 所有权
-  // 给这个 owned 物品设置自定义显示名，挂起执行，返回改名后的 OwnedResource。
-  rename(name: string): OwnedResource;
+interface ResourceOrigin {
+    readonly kind: "network" | "bus" | "order";
+    readonly endpoint: Network | Bus | null;
 }
 ```
 
-`Resource.nbt()` 是有界的只读转换，不能取得原始 `ItemStack`、NBT 对象或组件句柄。整数超过 `2^53` 的长整型以字符串返回，避免精度丢失。超过深度/节点上限的 NBT 会抛出脚本错误。
-
-`OwnedResource.rename(name)` 把该 owned 物品改名为 `name`：普通字符串按纯文本处理，合法 JSON 文本按序列化 Component 解析（例如 `{"text":"绿","color":"green"}`），从而支持颜色和样式。改名是缓存和所有权账本上的键迁移：旧键移除、新键存入，之后返回的句柄携带新键，可用 `push` 推送；旧句柄随余额校验失效。非物品资源（如流体）不支持改名，返回空数组。
-
-- `ctx.inputs` 是 AE 实际交付且由 workflow 拥有的精确资源；
-- `ctx.outputs` 是样板声明的期望值，不表示 workflow 已经拥有产物；
-- Bus 或 Network 的提取结果是 `OwnedResource`；
-- `push` 只接受当前 workflow 拥有的资源；
-- Java bridge 内部始终保存完整 AEKey，脚本不能用普通对象或物品 ID 伪造所有权。
-
-`OwnedResource` 是当前 workflow 对资源的持有权视图，不是把物品存在 JavaScript 对象里。控制器会把真实资源放在其私有 AE 存储元件中，同时把所有权账本和 workflow 一起持久化。
-
-因此，忘记输出资源后释放局部变量不会删除物品：
+`extract()` 只读取来源当前可用资源，并生成带来源的 Resource：
 
 ```js
-let input = source.items().extract(item("minecraft:iron_ore", 1));
-input = null;
-
-// 之后仍可重新取得当前 workflow 持有的资源。
-const stillOwned = ctx.owned;
+const products = furnace.extract();
 ```
 
-`ctx.owned` 每次读取都反映调用点处尚未消费的账本余额。旧的 `OwnedResource` 句柄不会因为其他 `push` 已消费同一余额而继续有效；再次使用时 Java 层会校验余额。
+此时资源仍在炉子中。如果在 Action 执行前被其他设备消耗，Action 会等待来源重新拥有足够的相同 AEKey。AEKey 对应的资源是同质的，后续补入来源的同种资源可以满足原 Resource。
 
-### 9.1 控制器私有缓存
+`extract(spec)` 将 `-1` 解析为调用时该来源中对应 AEKey 的全部可用数量，并把结果固化进 `bundle`。以后进入来源的新资源不会扩大这个 Resource。调用时数量为零会得到空 Resource；空 Resource 的转移立即成功。
 
-控制器提供专用存储元件槽，作为所有 workflow 共用但按账本隔离的物理 escrow：
+同一个 Resource 可以创建多个 Action，但它不代表对普通端点的独占所有权。多个 Action 竞争相同来源时由服务器主线程执行顺序决定，后执行者在库存不足时等待。
 
-- 至少安装一个能存放对应资源类型的 AE 存储元件，processing 输入才会被控制器接受；
-- Bus/Network 提取前先模拟完整结果，私有缓存不能完整接收时不改变来源并返回空数组；
-- 缓存不挂载到控制器任意一侧的 AE 网络，外部存储总线不能把它当普通网络库存访问；
-- 第一阶段只允许放入内容为空的存储元件；已格式化但内容为空的元件可以使用；
-- 只要仍有 workflow 持有资源，存储元件槽就锁定，玩家不能取出元件；如果账本损坏或旧版本迁移留下了无人持有的内容，元件解锁后可由玩家连同内容一起取走；
-- workflow 正常返回或失败后，框架尝试把仍持有的资源退回下单网络或其已经使用过的恢复网络；网络不可用时资源继续留在缓存中，不会随 JS 变量回收而消失；
-- 控制器被破坏时直接掉落带有实际内容的存储元件，不能再额外实体化账本资源，避免复制。
+## 5. 隐形订单托管
 
-没有兼容存储元件时，`BusStorage.extract()` 与 `NetworkStorage.extract()` 返回空数组，AE processing 下单则不被控制器接受。`push` 操作消费的是已经位于缓存中的 owned resource，因此不会凭空构造物品。缓存与 AE 存储元件一样天然跨通道：只要元件支持对应资源类型（物品元件、流体元件、附加通道元件），该通道就能被存入。
+AE2 把 processing pattern 输入交给控制器时，控制器将实际资源写入内部托管区。玩家不需要安装存储元件，托管区也不作为普通 AE 存储对外暴露。
 
-第一阶段不提供 `slice`、`split`、部分所有权结果或脚本构造任意 component patch。需要不同数量时直接在 AE processing pattern 中编码对应数量。
+每笔订单拥有独立分配：
 
-## 10. Bus 存储 API
+```text
+OrderEscrowOrigin(orderId)
+└── bundle：该订单尚未消费的输入
+```
 
-Bus 的存储按 AE 资源通道参数化：`bus.storage(channel)` 返回该通道的存储句柄，`bus.items()` 是物品通道的糖。句柄内部只保存 Bus 地址与通道，每次调用都重新解析当前世界的目标能力；目标方块没有该通道存储时返回 `null`。
-
-通道适配由 AE2 自身的 `ExternalStorageStrategy` 注册表完成（`StackWorldBehaviors`）：物品、流体免费支持，任何为 AE2 注册了世界存储策略的附加通道（化学品、能源元件等）自动接入，本 mod 无需逐类型适配代码。
+`order.input` 是指向该分配的 Resource，因此不会被其他订单或外部设备消费。
 
 ```ts
-interface BusStorage {
-  read(): readonly Resource[];
-  push(resources: OwnedResource | readonly OwnedResource[]): true;
-  pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
-  canPush(resources: Resource | readonly Resource[]): boolean;
-  extract(): readonly OwnedResource[];
+interface Order {
+    readonly input: Resource;
+    readonly network: Network;
 }
 ```
 
-`push` / `pushTillFull` / `canPush` 只接受该句柄通道内的资源；混入其他通道的资源会抛出脚本错误。`extract()` 提取该通道在当前目标面上可提取的全部资源。
+物理数据可以聚合存放，但账本必须按 `orderId` 隔离。不得只维护一个全局 `AEKey → amount` 池，否则相同输入的订单会互相消费。
 
-### 10.1 `read()`
+隐形托管必须有背压。MVP 可以先限制控制器活动 processing job 数；达到限制时拒绝新的 pattern push，让 AE2 稍后重试。
 
-返回调用时该目标面该通道可见的资源快照，不修改世界。脚本可以用普通数组方法检查内容。返回值只是观察值，不能传给 `push`。
+## 6. Action 和等待条件
 
-### 10.2 `push(resources)`
+Action 持有执行状态，Resource 不持有进度。
 
-挂起并向这个 Bus 地址精确推送给定资源的完整集合到该通道存储，**每服务端 tick 重试一次，直到全部数量一次性被目标接受后才返回 `true`**：
+```text
+TransferAction
+├── source
+├── target
+├── remaining
+└── mode：PARTIAL | EXACT
+```
 
-- 只在目标能完整接收时推送，不允许部分成功；
-- 推送失败时脚本不会恢复，同一动作在下一 tick 重试；
-- 目标持续无法接收（消失、capability 不存在或容量不足）时，workflow 一直挂起在调用点；
-- 需要非阻塞判断时先用 `canPush` 查询，再决定是否等待。
+同一个 Action 在 `.now()` 或调度重试后会更新自己的 `remaining`；再次执行这个 Action 只处理剩余部分，不会从初始 bundle 重新搬运。
 
-参数非法、资源不属于当前 workflow、资源数量已被消费或通道不符时抛出脚本错误。这与 AE 下单语义一致：AE 的 processing 任务同样在目标无法接收全部输入时等待。
+每次尝试都重新解析 source 和 target，并查询：
 
-### 10.3 `pushTillFull(resources)`
+```text
+来源当前库存
+&& 目标当前容量
+```
 
-挂起并每 tick 向目标推送**当前能接受的部分输入**，直到整个资源列表全部进入目标后返回 `true`：
+### 6.1 `to(target)`
 
-- 每 tick 只尝试一次，按能容纳的量逐步填充目标；
-- 每 tick 已成功推送的部分会从 workflow 所有权中扣除，剩余部分下一 tick 继续；
-- 目标每次只能收一点时（例如熔炉输入槽），用这个函数代替 `push` 可以持续补料直到全部输入被消耗；
-- 目标一直不可用时同样持续挂起。
+`to` 每次转移当前能够转移的部分：
 
-`push` 与 `pushTillFull` 的分工：`push` 要求一次精确全部、绝不部分；`pushTillFull` 允许部分填充、直到全部。
+```text
+min(remaining, source.available, target.capacity)
+```
 
-### 10.4 `canPush(resources)`
+- 来源无资源时等待；
+- 目标无容量时等待；
+- 每次允许产生部分进度；
+- `remaining` 归零时成功。
 
-同步查询，不挂起、不转移资源：返回当前目标能否**一次性**接受精确的完整资源列表。`resources` 可以是普通资源规格（不要求 owned）。
+```js
+yield resource.to(target);
+```
 
-### 10.5 `extract()`
+### 6.2 `pushExactlyInto(target)`
 
-无参数提取该目标面该通道此刻可提取的全部资源：
+精确转移只有在来源拥有完整 `remaining`，并且目标能够一次接收完整 `remaining` 时才执行。任一条件不满足都不移动资源并继续等待。
 
-- 返回实际提取并由 workflow 拥有的资源数组；
-- 没有资源、目标消失或该通道能力不存在时返回空数组；
-- 不传 selector、期望数量或 timeout；
-- 不等待产物，不判断批次归属；
-- 一次调用只尝试一次。
+```js
+yield resource.pushExactlyInto(target);
+```
 
-这种语义适合"机器输出面有什么就全部送回网络"的主要用例。需要区分机器内部不同产物时，先通过方块的物理侧面、Bus 配置或专用脚本解决；第一阶段不为它设计复杂提取结果。
+### 6.3 `.now()`
 
-## 11. Network 存储 API
+JavaScript 无法让 `to()` 知道它的返回值之后是否被外层 `yield`，因此非阻塞操作显式使用 `.now()`：
 
-Bus 与 AE 网络不强行实现同一个存储接口。二者都支持精确 `push`，但提取语义不同：从机器输出面可以无条件全部取出，从大型 AE 网络无条件清空显然不安全。`network.storage(channel)` 返回按通道过滤视图的存储句柄，`network.items()` 是物品通道的糖。
+```js
+const remaining = resource.to(target).now();
+const success = resource.pushExactlyInto(target).now();
+```
 
-```ts
-interface NetworkStorage {
-  push(resources: OwnedResource | readonly OwnedResource[]): true;
-  pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
-  canPush(resources: Resource | readonly Resource[]): boolean;
-  extract(requests: Resource | readonly Resource[]): readonly OwnedResource[];
-  read(): readonly Resource[];
-  count(spec: string | Resource): number;
+- `to(...).now()` 只尝试一次，返回尚未转移的 Resource；
+- `pushExactlyInto(...).now()` 只尝试一次，返回 boolean；
+- `.now()` 不进入调度器，不跨 tick 等待。
+
+## 7. 原子性与恢复
+
+所有资源操作都在服务器线程执行，仍然需要处理第三方存储模拟结果与实际执行不一致的问题。
+
+- EXACT Action 先模拟来源和目标，再执行完整转移；
+- 目标实际拒绝时优先回滚到来源；
+- 无法完整回滚时写入控制器内部 recovery escrow，禁止删除或复制资源；
+- PARTIAL Action 只从进度中扣除实际成功进入目标的数量。
+
+订单托管区和 recovery escrow 是内部正确性机制，不是玩家容量玩法。
+
+## 8. Java 桥接边界
+
+脚本 API 由专门的 Java facade 类实现。桥接类中的自声明 public 方法默认全部暴露给 JS：
+
+```java
+@JsBridge
+public final class JsResource {
+    private final ResourceRef resource;
+
+    public JsTransferAction to(JsEndpoint target) { ... }
+    public JsTransferAction pushExactlyInto(JsEndpoint target) { ... }
 }
 ```
 
-`push` / `pushTillFull` / `canPush` / `extract` 作用于整个 AE 网格存储（天然跨通道），不限制句柄通道；`read()` 与 `count()` 按句柄通道过滤。混入其他通道的资源在 `push`/`extract` 中正常工作。
-
-### 11.1 `network.storage(channel).push(resources)`
-
-挂起并向指定 AE 网络精确推送完整资源集合，**每 tick 重试直到全部数量一次性被网络接受后返回 `true`**：
-
-- 只在网络能完整接收时推送，不允许部分成功；
-- 网络离线、满仓或无法完整接收时持续挂起重试；
-- 不自动改送下单网络或其他控制器面。
-
-### 11.2 `network.storage(channel).pushTillFull(resources)`
-
-挂起并每 tick 向网络推送当前能接受的部分输入，直到整个资源列表全部进入网络后返回 `true`。与 `bus.storage(channel).pushTillFull` 语义一致，用于把产出逐步回流到大型网络。
-
-### 11.3 `network.storage(channel).canPush(resources)`
-
-同步查询，不挂起、不转移资源：返回该网络当前能否一次性接受精确的完整资源列表。`resources` 可以是普通资源规格。
-
-### 11.4 `network.storage(channel).extract(requests)`
-
-这是被动生产从 AE 网络取得输入所需的最小能力：
-
-- `requests` 必须是精确资源与精确数量；
-- 网络能完整提供时返回对应 `OwnedResource[]`；
-- 数量不足、网络离线或请求不可用时返回空数组；
-- 不支持标签请求、部分数量或复杂结果对象。
-
-示例：
-
-```js
-const source = ctx.network("north");
-if (!source.online()) return;
-
-const ores = source.items().extract(item("minecraft:iron_ore", 1));
-if (ores.length === 0) return;
-
-// 流体同理：
-const water = source.storage("fluid").extract(stack("fluid", "minecraft:water", 1000));
-```
-
-### 11.5 `network.storage(channel).read()` 与 `.count(spec)`
-
-两个同步只读操作，不改变网络、不转移资源，也不触发挂起。它们读取当前 tick 该 AE 网格在句柄通道内可提供的资源：
-
-- `read()` 返回当前可提供资源的独立快照数组，元素是观察值（不能传给 `push`）；
-- `count(spec)` 返回匹配数量；`spec` 为字符串时按资源 id 或 `#tag` 宽松匹配（不区分数据组件，tag 按资源自身通道解析），为资源对象时精确匹配其 AE key（`stack(channel, id, amount, nbt)` 可用于按组件统计）。
-
-网络离线或未接线时 `read()` 返回空数组、`count(spec)` 返回 `0`。`read()` 与 `count()` 是同步只读操作，processing/passive workflow 与 initializer（仅限其声明监听的网络）都可以调用。
-
-```js
-const north = ctx.network("north");
-if (north.online() && north.items().count("minecraft:iron_ingot") < 64) {
-  // 铸造更多铁锭。
-}
-if (north.online() && north.storage("fluid").count("minecraft:water") < 8000) {
-  // 补充水。
-}
-```
-
-## 12. 脚本样板
-
-```ts
-interface ScriptPatternDefinition {
-  readonly id: string;
-  readonly inputs: readonly Resource[];
-  readonly outputs: readonly Resource[];
-  readonly handler: (ctx: ProcessingContext) => void;
-}
-```
-
-```js
-registerPatterns({
-  orderNetwork: "north",
-  patterns: [
-    {
-      id: "iron",
-      inputs: [item("minecraft:iron_ore", 1)],
-      outputs: [item("minecraft:iron_ingot", 1)],
-      handler: smelt
-    }
-  ]
-});
-```
-
-每个样板直接绑定自己的 handler，不进入控制器通用 handler。同一个 handler 可以被多个样板复用。
-
-## 13. 控制器通用 handler
-
-```js
-registerControllerHandler({
-  orderNetwork: "north",
-  handler: smelt
-});
-```
-
-规则：
-
-- 只处理控制器实体样板槽中的 AE processing pattern；
-- 这些样板只发布到指定的 `orderNetwork`；
-- 每次 AE 推送产生独立 workflow；
-- `ctx.inputs` 和 `ctx.outputs` 来自该次样板执行。
-
-processing job 在对应 AE crafting 请求结束时会被取消，无论该请求是用户取消、链路失效，还是 AE 判定输出已齐（例如请求输出由其他方式回料、或被其他 job 一并取回）。取消发生在控制器下一次 tick：未消费的 owned 资源退回下单网络（recovery 兜底），脚本 continuation 不再恢复，等价于该次任务已视为完成。
-
-## 14. 被动产线
-
-被动产线直接注册一个长期运行函数：
-
-```ts
-registerPassive(handler: (ctx: PassiveContext) => never): void
-```
-
-```js
-registerPassive(function feedOre(ctx) {
-  while (true) {
-    const source = ctx.network("north");
-    const line = productionLines[0];
-    if (!source.online() || line === undefined) {
-      ctx.sleep(20);
-      continue;
-    }
-
-    const output = line.output.items();
-    if (output === null
-        || !clearBeforeStart(ctx, output, source.items(), 200)) {
-      ctx.log("Cannot clear production line");
-      ctx.sleep(20);
-      continue;
-    }
-
-    const input = source.items().extract(item("minecraft:iron_ore", 1));
-    if (input.length === 0) {
-      ctx.sleep(20);
-      continue;
-    }
-
-    const targetItems = line.input.items();
-    if (targetItems === null) {
-      // 目标面消失：先把 input 退回源网络，下一轮再重新选择。
-      source.items().push(input);
-      continue;
-    }
-
-    // push 挂起直到熔炉一次性接受全部输入。
-    targetItems.push(input);
-
-    // 产线节奏完全由脚本决定。
-    ctx.sleep(20);
-  }
-});
-```
-
-生命周期：
-
-- 程序首次成功初始化后，每个 `registerPassive(handler)` 启动一次；
-- 每次注册固定只有一条 continuation，不提供 `concurrency`；
-- 没有调度器 `interval`，循环内部用 `sleep` 控制节奏；
-- topology initializer 执行期间所有产线暂停调度，initializer 完成后从原调用点继续；
-- initializer 报错时产线保持暂停，直到该 revision 的 initializer 成功；
-- initializer 更新的全局 Bus 缓存会被产线后续代码看到；
-- initializer 不会隐式重启产线或丢弃其局部变量；
-- handler 正常返回表示产线主动停止，只在新 program revision 启动新版本时重新创建；
-- program revision 更新会在安全挂起点停止旧产线、保全其资源，然后执行新 initializer 并启动新产线；
-- handler 必须定期 `sleep` 或 `yield`，纯忙循环会触发脚本指令上限。
-
-被动产线不属于 AE crafting job，不占 AE crafting CPU。多个 `registerPassive` 调用表示多条显式产线，而不是同一产线的并发副本。
-
-## 15. 用户态等待与超时
-
-`push` 与 `pushTillFull` 会挂起并每 tick 重试，直到完成才返回；`extract` 的空数组和 `canPush` 的 `false` 是需要脚本自行决定等待的运行结果。`extract` 没有内置等待，脚本可以用包装函数轮询：
-
-```js
-function extractEventually(ctx, items, interval) {
-  let result = [];
-  while (result.length === 0) {
-    result = items.extract();
-    if (result.length === 0) ctx.sleep(interval);
-  }
-  return result;
-}
-```
-
-需要非阻塞判断推送是否可行时，先查 `canPush`：
-
-```js
-function pushIfPossible(ctx, items, resources, interval) {
-  while (!items.canPush(resources)) {
-    ctx.sleep(interval);
-  }
-  items.push(resources); // 下一 tick 必然一次性成功
-}
-```
-
-Bus 地址失效时这些包装函数会一直等待。希望换地址的脚本应在循环中重新读取 `ctx.buses` 或 `network.buses` 并重新选择。框架不会保存筛选函数，也不会自动重新求值动作参数。`push`/`pushTillFull` 挂起期间脚本无法执行其他动作，需要超时或改换目标的产线应当用 `canPush` + `ctx.sleep` 组合自行控制节奏。
-
-### 15.1 deadline
-
-第一阶段不增加异步 `setTimeout(callback)`。这种 API 会在当前产线之外创建第二条 continuation，重新引入隐藏并发和资源所有权问题。
-
-等待超时可以直接用持续更新的 `ctx.tick` 表达：
-
-```js
-function waitUntil(ctx, predicate, timeoutTicks, interval) {
-  const deadline = ctx.tick + timeoutTicks;
-
-  while (!predicate()) {
-    if (ctx.tick >= deadline) return false;
-    ctx.sleep(interval);
-  }
-
-  return true;
-}
-```
-
-`ctx.tick` 是读取时的当前服务器 tick，不是 workflow 创建时的固定值。
-
-### 15.2 开始生产前清空机器
-
-产线可以在每轮开始时清空输出面，并用 deadline 防止永久等待：
-
-```js
-function clearBeforeStart(ctx, output, sink, timeoutTicks) {
-  const deadline = ctx.tick + timeoutTicks;
-
-  while (ctx.tick < deadline) {
-    const leftovers = output.extract();
-    if (leftovers.length === 0) return true;
-
-    while (!sink.canPush(leftovers)) {
-      if (ctx.tick >= deadline) return false;
-      ctx.sleep(1);
-    }
-    sink.push(leftovers);
-
-    // 即使机器持续产生物品，也让服务器 tick 和 deadline 前进。
-    ctx.yield();
-  }
-
-  return false;
-}
-```
-
-`sink` 可以是下单网络、生产网络或脚本选择的其他 NetworkItems。清空失败后的停止、报警或继续生产仍由产线代码决定。
-
-## 16. 主网下单、子网生产示例
-
-```js
-let furnaces = [];
-
-initialize({
-  networks: ["south"],
-  handler: function (ctx) {
-    furnaces = [];
-
-    const production = ctx.network("south");
-    if (production.online()) {
-      furnaces = buildLines(production.buses);
-    }
-  }
-});
-
-function smelt(ctx) {
-  const line = furnaces.find(candidate =>
-    candidate.input.exists() && candidate.output.exists()
-  );
-
-  if (line === undefined) {
-    ctx.fail("No furnace on production network");
-  }
-
-  const input = line.input.items();
-  const output = line.output.items();
-  if (input === null || output === null) {
-    ctx.fail("Furnace bus disappeared");
-  }
-
-  // 精确推送：挂起直到熔炉能一次性接收全部输入。
-  input.push(ctx.inputs);
-
-  // 输出面有什么就取出什么，不要求框架追踪批次。
-  const products = extractEventually(ctx, output, 5);
-
-  // 下单网络是 north；执行 Bus 来自 south 子网。push 会挂起重试直到全部进入网络。
-  ctx.orderNetwork.items().push(products);
-}
-
-registerPatterns({
-  orderNetwork: "north",
-  patterns: [
-    {
-      id: "iron",
-      inputs: [item("minecraft:iron_ore", 1)],
-      outputs: [item("minecraft:iron_ingot", 1)],
-      handler: smelt
-    }
-  ]
-});
-
-registerControllerHandler({
-  orderNetwork: "north",
-  handler: smelt
-});
-```
-
-这里没有 `executionNetwork` 全局字段。执行网络是脚本本次通过 `ctx.network("south")` 选择的，因此同一个 handler 可以按配方、在线状态或用户逻辑改用其他网络。
-
-## 17. AE crafting CPU 固定空间
-
-第一阶段不注入虚拟资源，也不根据源码或 continuation 的 Java 内存估算空间。MFM 以普通 `IPatternDetails` 参与 AE crafting plan；AE 原生会按样板执行次数计入固定 crafting bytes，因此脚本样板和控制器槽内样板自然占用 crafting CPU，而不需要“包裹通用堆栈”或额外显示一种资源。
-
-这个成本由样板执行次数决定，不由脚本声明或查询。被动 workflow 不属于 AE crafting job，因此不占 crafting CPU。若实践证明原版的固定成本不足，再单独增加服务端配置和 AE 集成点；它不进入首版脚本 API。
-
-## 18. 暂不设计
-
-- `InsertResult`、`ExtractResult` 或失败原因枚举；
-- 部分插入、部分请求、`moved` / `remaining` 资源切片；
-- selector/tag 网络提取（`extract` 仍要求精确数量；`count` 支持 tag 字符串）；
-- `Resource.slice`、`Resource.split`；
-- Java 侧 Machine、机器池、租约或批次归属；
-- `getMachine(s)`、原生 Bus filter callback 或查询 DSL；
-- 自动换 Bus、自动换网络或参数重新求值（`push`/`pushTillFull` 只对选定地址等待重试，不重新选择目标）；
-- 独立并发的 `setTimeout(callback)` 定时任务；
-- Bus UUID、移动后保持身份或预期 block ID 校验；
-- 能量(FE)资源——AE2 把能量视为独立 grid 服务而不是 AE key 通道，因此不走本 API；除非附属把它做成可存储的 AEKeyType；
-- `break(tool)` 的耐久扣减（工具当前只借用不消耗）；
-- 默认机器并发锁；
-- 根据 Rhino 实际内存动态计算 crafting CPU bytes。
-
-这些能力以后只在真实脚本证明现有原语无法合理表达时再加入。
+绑定器只扫描 `getDeclaredMethods()`，忽略继承方法、synthetic/bridge 方法和未标记类。普通 Minecraft、AE2 与业务层 Java 对象不得直接包装到 JS。
+
+桥接方法只接受或返回：
+
+- JS facade；
+- 字符串、boolean 和安全范围内数字；
+- 显式转换的数组或只读数据；
+- Action；
+- `null` / `undefined`。
+
+核心资源和调度类型不依赖 Rhino；facade 只持有核心对象或句柄。
+
+## 9. 生命周期与失败语义
+
+- 脚本保存或重载：先创建新 runtime；成功后终止旧 generator，其托管资源进入恢复流程；
+- 服务器重启：不恢复 generator 调用点；
+- processing generator 丢失：订单进入失败/恢复状态，玩家可以取消并重新下单；
+- passive generator 丢失：控制器加载后从 `go` 的入口重新创建；
+- 总线暂时无法解析或目标机器不提供所需存储：Action 保持等待；
+- 单纯缺少来源资源或目标容量：保持等待，并向 UI 暴露缺少的 bundle 或目标满状态。
+
+隐形托管资源的数据量很小，可以与控制器 NBT 一起保存；这不要求保存 JavaScript generator 或调用栈。
+
+## 10. MVP 暂不实现
+
+- generator 和局部变量跨服务器重启恢复；
+- 旧 `ctx` API 兼容层；
+- 玩家安装的控制器 AE cell；
+- 自动机器选择、机器池、租约和并发锁；
+- 端点移动后的身份保持；
+- 多 workflow 并行组合、Promise、async/await；
+- Action timeout、取消令牌和复杂失败原因对象；
+- 任意 Java 对象的 Rhino 原生反射访问。

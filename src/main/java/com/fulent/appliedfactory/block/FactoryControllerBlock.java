@@ -1,13 +1,11 @@
 package com.fulent.appliedfactory.block;
 
 import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
-import com.fulent.appliedfactory.menu.FactoryControllerMenu;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
 
 import com.mojang.serialization.MapCodec;
 
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
@@ -63,22 +61,16 @@ public final class FactoryControllerBlock extends BaseEntityBlock {
         super.onRemove(state, level, pos, newState, movedByPiston);
     }
 
-    // 右键顶面打开编程ui，其他面打开物品页面
+    // The MVP controller has no visible inventory; every face opens the program editor.
     @Override
     public InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player,
             BlockHitResult hit) {
         if (!level.isClientSide && player instanceof ServerPlayer serverPlayer
                 && level.getBlockEntity(pos) instanceof FactoryControllerBlockEntity factory) {
-            if (hit.getDirection() == Direction.UP) {
-                ((IPlayerExtension) serverPlayer).openMenu(new net.minecraft.world.SimpleMenuProvider(
-                        (containerId, inventory, ignored) -> new FactoryControllerProgramMenu(
-                                containerId, inventory, factory),
-                        Component.translatable("gui.appliedfactory.program")), pos);
-            } else {
-                ((IPlayerExtension) serverPlayer).openMenu(new net.minecraft.world.SimpleMenuProvider(
-                        (containerId, inventory, ignored) -> new FactoryControllerMenu(containerId, inventory, factory),
-                        Component.translatable("gui.appliedfactory.storage")), pos);
-            }
+            ((IPlayerExtension) serverPlayer).openMenu(new net.minecraft.world.SimpleMenuProvider(
+                    (containerId, inventory, ignored) -> new FactoryControllerProgramMenu(
+                            containerId, inventory, factory),
+                    Component.translatable("gui.appliedfactory.program")), pos);
         }
         return InteractionResult.sidedSuccess(level.isClientSide);
     }

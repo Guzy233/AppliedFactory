@@ -1,17 +1,18 @@
 package com.fulent.appliedfactory.script;
 
-/** Controller-owned scripting engine for one loaded program revision. */
+/** Controller-owned scripting engine for one loaded source revision. */
 public interface ScriptRuntime {
     ProgramLoadResult<CompiledControllerProgram> loadProgram(String source);
 
-    /**
-     * Starts any registered handler (initializer, controller, pattern or passive). The handler
-     * may suspend; the returned step then carries its continuation for later {@link #resume}.
-     */
-    ScriptStep startHandler(ScriptHandlerRef handler, ScriptExecutionContext context);
+    ProgramLoadResult<ScriptWorkflow> createWorkflow(
+            ScriptHandlerRef handler,
+            ScriptExecutionContext context);
 
-    ScriptStep resume(
+    ScriptStep advance(
+            ScriptWorkflow workflow,
             ScriptExecutionContext context,
-            ScriptContinuation continuation,
-            FactoryActionResult result);
+            Object result,
+            boolean firstStep);
+
+    void runTopologyListeners();
 }

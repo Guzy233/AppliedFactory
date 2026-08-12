@@ -11,9 +11,5 @@
   "gui.appliedfactory.save_success": "已保存",
   "gui.appliedfactory.syntax_error": "语法错误：%s",
   "gui.appliedfactory.subscribe_errors": "订阅报错",
-  "gui.appliedfactory.cache": "私有缓存",
-  "gui.appliedfactory.storage": "控制器存储",
-  "gui.appliedfactory.patterns": "加工样板",
-  "gui.appliedfactory.inventory": "玩家物品栏",
   "chat.appliedfactory.script_error": "工厂控制器 %s 的脚本错误（%s）：%s"
 }

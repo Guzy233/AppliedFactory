@@ -8,7 +8,6 @@ import com.fulent.appliedfactory.block.FactoryControllerBlock;
 import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.item.FactoryBusItem;
 import com.fulent.appliedfactory.menu.FactoryBusMenu;
-import com.fulent.appliedfactory.menu.FactoryControllerMenu;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
 import com.fulent.appliedfactory.network.NetworkHandler;
 import com.fulent.appliedfactory.part.FactoryBusPart;
@@ -66,9 +65,6 @@ public final class AppliedFactory {
             .register("factory_controller", () -> BlockEntityType.Builder
                     .of(FactoryControllerBlockEntity::new, FACTORY_CONTROLLER.get()).build(null));
 // 控制器面板
-    public static final DeferredHolder<MenuType<?>, MenuType<FactoryControllerMenu>> FACTORY_CONTROLLER_MENU = MENUS
-            .register("factory_controller",
-                    () -> IMenuTypeExtension.create(FactoryControllerMenu::new));
 // 代码面板
     public static final DeferredHolder<MenuType<?>, MenuType<FactoryControllerProgramMenu>> FACTORY_CONTROLLER_PROGRAM_MENU = MENUS
             .register("factory_controller_program",

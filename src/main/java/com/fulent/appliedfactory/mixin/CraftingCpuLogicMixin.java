@@ -34,7 +34,7 @@ import net.minecraft.world.level.Level;
  *       tells the owning controllers on the CPU's grid the request id so they can cancel their
  *       matching jobs. A successful finish does NOT cancel anything: the workflow itself delivers
  *       the outputs and finishes normally on its own, and killing it mid-run would discard a
- *       still-valid continuation and churn its owned resources.
+ *       still-running generator and churn its escrow resources.
  * </ul>
  */
 @Mixin(CraftingCpuLogic.class)

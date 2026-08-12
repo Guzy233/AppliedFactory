@@ -1,22 +1,32 @@
 /// <reference path="./factory-controller.d.ts" />
 
-function smelt(ctx: ProcessingContext): void {
-    const production: Network = ctx.network("south");
-    if (!production.online()) {
-        ctx.sleep(20);
-        return;
-    }
+const production = network("south");
+let furnaces: readonly Bus[] = [];
 
-    // This is intentionally a typed starting point. Replace it with your production logic.
-    ctx.log("Production buses: " + production.buses.length);
+function refreshFurnaces(): void {
+    furnaces = production.buses.filter(bus =>
+        bus.target !== null && bus.target.id === "minecraft:furnace"
+    );
 }
 
-registerPatterns({
-    orderNetwork: "north",
-    patterns: [{
+production.onChange(refreshFurnaces);
+refreshFurnaces();
+
+registerProcessingPattern(
+    [{
         id: "iron",
+        orderNetwork: "north",
         inputs: [item("minecraft:iron_ore", 1)],
-        outputs: [item("minecraft:iron_ingot", 1)],
-        handler: smelt
-    }]
-});
+        outputs: [item("minecraft:iron_ingot", 1)]
+    }],
+    function* (order: Order): Generator<Action, void, unknown> {
+        const furnace = furnaces[0];
+        if (furnace === undefined) {
+            yield sleep(20);
+            return;
+        }
+        yield order.input.pushExactlyInto(furnace);
+        yield sleep(200);
+        yield furnace.extract().to(order.network);
+    }
+);
