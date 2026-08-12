@@ -17,6 +17,8 @@ import appeng.api.config.Actionable;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEKeyType;
+import appeng.api.stacks.KeyCounter;
 import appeng.api.storage.MEStorage;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -26,6 +28,8 @@ import net.minecraft.world.item.ItemStack;
 
 /** Executes one non-waiting script action against the controller's private cache. */
 public final class FactoryActionExecutor {
+    private static final IActionSource BUS_SOURCE = IActionSource.empty();
+
     private final FactoryCellCache cache;
     private final Function<FactoryBusAddress, Optional<com.fulent.appliedfactory.part.FactoryBusPart>>
             busResolver;
@@ -81,14 +85,14 @@ public final class FactoryActionExecutor {
         if (!job.canConsumeOwned(resources)) {
             throw new IllegalStateException("Workflow does not own bus drop resources");
         }
-        var machine = resolvedMachine(action.bus());
+        var target = resolvedTarget(action.bus());
         var stacks = toItemStacks(resources);
-        if (machine == null || stacks == null || !cache.removeAll(resources)) {
+        if (target == null || stacks == null || !cache.removeAll(resources)) {
             return false;
         }
         final boolean dropped;
         try {
-            dropped = machine.throwItems(stacks);
+            dropped = target.throwItems(stacks);
         } catch (RuntimeException exception) {
             restoreCacheOrThrow(resources, "bus drop", exception);
             return false;
@@ -103,8 +107,8 @@ public final class FactoryActionExecutor {
     }
 
     private boolean useBus(FactoryScriptAction action) {
-        var machine = resolvedMachine(action.bus());
-        return machine != null && machine.use();
+        var target = resolvedTarget(action.bus());
+        return target != null && target.use();
     }
 
     private boolean placeAtBus(FactoryJob job, FactoryScriptAction action) {
@@ -112,14 +116,14 @@ public final class FactoryActionExecutor {
         if (!job.canConsumeOwned(action.resources())) {
             throw new IllegalStateException("Workflow does not own bus placement resource");
         }
-        var machine = resolvedMachine(action.bus());
+        var target = resolvedTarget(action.bus());
         var stacks = toItemStacks(action.resources());
-        if (machine == null || stacks == null || stacks.size() != 1 || !cache.removeAll(action.resources())) {
+        if (target == null || stacks == null || stacks.size() != 1 || !cache.removeAll(action.resources())) {
             return false;
         }
         final boolean placed;
         try {
-            placed = machine.place(stacks.get(0));
+            placed = target.place(stacks.get(0));
         } catch (RuntimeException exception) {
             restoreCacheOrThrow(action.resources(), "bus placement", exception);
             return false;
@@ -134,23 +138,23 @@ public final class FactoryActionExecutor {
     }
 
     private List<FactoryResource> breakBus(FactoryJob job, FactoryScriptAction action) {
-        var machine = resolvedMachine(action.bus());
-        if (machine == null) {
+        var target = resolvedTarget(action.bus());
+        if (target == null) {
             return List.of();
         }
         var tool = action.resources().isEmpty() ? null : breakTool(job, action);
-        var preview = resources(machine.previewBreakDrops(tool));
+        var preview = resources(target.previewBreakDrops(tool));
         if (!cache.canStoreAll(preview)) {
             return List.of();
         }
-        var result = machine.breakAndCollect(tool);
+        var result = target.breakAndCollect(tool);
         if (!result.destroyed()) {
             return List.of();
         }
         var drops = resources(result.drops());
         if (!drops.isEmpty() && !cache.storeAll(drops)) {
             // A modded loot table may produce more than its preview. Preserve rather than delete it.
-            machine.throwItems(result.drops());
+            target.throwItems(result.drops());
             return List.of();
         }
         job.addOwned(drops);
@@ -250,32 +254,38 @@ public final class FactoryActionExecutor {
         });
     }
 
+    /**
+     * Pushes a complete resource list into the target's storage for the action's
+     * key channel. Every resource has been validated to belong to that channel at
+     * script parse time; the push succeeds only when the target accepts the exact
+     * full list in one shot, otherwise nothing stays inserted.
+     */
     private boolean pushToBus(FactoryJob job, FactoryScriptAction action) {
         var resources = action.resources();
         if (!job.canConsumeOwned(resources)) {
             throw new IllegalStateException("Workflow does not own bus push resources");
         }
-        var bus = busResolver.apply(action.bus()).orElse(null);
-        var machine = bus == null ? null : bus.machine().orElse(null);
-        var stacks = toItemStacks(resources);
-        if (machine == null || stacks == null || !machine.canInsertAll(stacks)) {
+        if (resources.isEmpty()) {
+            return true;
+        }
+        var target = resolvedTarget(action.bus());
+        var storage = target == null ? null : target.storage(action.channel());
+        if (storage == null || !canInsertAll(storage, resources)) {
             return false;
         }
         if (!cache.removeAll(resources)) {
             return false;
         }
-        var rejected = machine.insertAll(stacks);
-        if (!rejected.isEmpty()) {
-            var rejectedResources = resources(rejected);
-            if (!cache.storeAll(rejectedResources)) {
-                machine.dropItems(rejected);
+        var inserted = new ArrayList<FactoryResource>();
+        for (var resource : resources) {
+            var amount = storage.insert(
+                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
+            if (amount > 0) {
+                inserted.add(new FactoryResource(resource.key(), amount));
             }
-            var inserted = subtract(resources, rejectedResources);
-            if (!inserted.isEmpty()) {
-                job.consumeOwned(inserted);
+            if (amount != resource.amount()) {
+                return recoverPartialBusPush(storage, resources, inserted);
             }
-            throw new IllegalStateException(
-                    "Target item handler violated successful insertion simulation");
         }
         job.consumeOwned(resources);
         changed.run();
@@ -284,38 +294,31 @@ public final class FactoryActionExecutor {
 
     /**
      * One attempt of a blocking till-full bus push: inserts as much as the target
-     * accepts, moves that from the cache to the workflow ledger, and reports the
-     * remaining resources. Nothing is inserted when the target is unavailable; the
-     * scheduler retries the remainder on the next tick.
+     * accepts for the action's key channel, moves that from the cache to the
+     * workflow ledger, and reports the remaining resources. Nothing is inserted
+     * when the target is unavailable; the scheduler retries the remainder on the
+     * next tick.
      */
     private FactoryActionResult pushTillFullToBus(FactoryJob job, FactoryScriptAction action) {
         var resources = action.resources();
         if (!job.canConsumeOwned(resources)) {
             throw new IllegalStateException("Workflow does not own bus push resources");
         }
-        var bus = busResolver.apply(action.bus()).orElse(null);
-        var machine = bus == null ? null : bus.machine().orElse(null);
-        if (machine == null) {
+        var target = resolvedTarget(action.bus());
+        var storage = target == null ? null : target.storage(action.channel());
+        if (storage == null) {
             return FactoryActionResult.remaining(resources);
         }
-        var stacks = toItemStacks(resources);
-        if (stacks == null) {
-            return FactoryActionResult.remaining(resources);
-        }
-        var amounts = new LinkedHashMap<AEKey, Long>();
-        for (var stack : stacks) {
-            var remainder = machine.insert(stack, false);
-            var insertedCount = stack.getCount() - remainder.getCount();
-            if (insertedCount > 0) {
-                amounts.merge(AEItemKey.of(stack), (long) insertedCount, Math::addExact);
+        var inserted = new ArrayList<FactoryResource>();
+        for (var resource : resources) {
+            var amount = storage.insert(
+                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
+            if (amount > 0) {
+                inserted.add(new FactoryResource(resource.key(), amount));
             }
         }
-        var inserted = fromAmounts(amounts);
         if (!inserted.isEmpty() && !cache.removeAll(inserted)) {
-            var rejected = machine.insertAll(toItemStacks(inserted));
-            if (!rejected.isEmpty()) {
-                machine.dropItems(rejected);
-            }
+            rollbackBusInsertion(storage, inserted);
             return FactoryActionResult.remaining(resources);
         }
         if (!inserted.isEmpty()) {
@@ -325,10 +328,53 @@ public final class FactoryActionExecutor {
         return FactoryActionResult.remaining(subtract(resources, inserted));
     }
 
-    private com.fulent.appliedfactory.factory.FactoryMachineAccess resolvedMachine(
-            FactoryBusAddress address) {
+    /**
+     * Extracts everything the target currently exposes for the action's key
+     * channel and hands it to the workflow as owned resources. The target's full
+     * channel contents are simulated against the cache first; when the cache
+     * cannot store them all, nothing is extracted.
+     */
+    private List<FactoryResource> extractFromBus(
+            FactoryJob job, FactoryScriptAction action) {
+        var target = resolvedTarget(action.bus());
+        var storage = target == null ? null : target.storage(action.channel());
+        if (storage == null) {
+            return List.of();
+        }
+        var amounts = new KeyCounter();
+        storage.getAvailableStacks(amounts);
+        var available = new ArrayList<FactoryResource>();
+        for (var entry : amounts) {
+            if (entry.getLongValue() > 0) {
+                available.add(new FactoryResource(entry.getKey(), entry.getLongValue()));
+            }
+        }
+        if (available.isEmpty() || !cache.canStoreAll(available)) {
+            return List.of();
+        }
+        var extracted = new ArrayList<FactoryResource>();
+        for (var resource : available) {
+            var amount = storage.extract(
+                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
+            if (amount > 0) {
+                extracted.add(new FactoryResource(resource.key(), amount));
+            }
+        }
+        if (extracted.isEmpty()) {
+            return List.of();
+        }
+        if (!cache.storeAll(extracted)) {
+            rollbackBusInsertion(storage, extracted);
+            return List.of();
+        }
+        job.addOwned(extracted);
+        changed.run();
+        return List.copyOf(extracted);
+    }
+
+    private FactoryBusTarget resolvedTarget(FactoryBusAddress address) {
         var bus = busResolver.apply(address).orElse(null);
-        return bus == null ? null : bus.machine().orElse(null);
+        return bus == null ? null : bus.target().orElse(null);
     }
 
     private void restoreCacheOrThrow(
@@ -343,32 +389,44 @@ public final class FactoryActionExecutor {
         }
     }
 
-    private List<FactoryResource> extractFromBus(
-            FactoryJob job, FactoryScriptAction action) {
-        var bus = busResolver.apply(action.bus()).orElse(null);
-        var machine = bus == null ? null : bus.machine().orElse(null);
-        if (machine == null) {
-            return List.of();
-        }
-        var simulated = resources(machine.extractAll(true));
-        if (simulated.isEmpty() || !cache.canStoreAll(simulated)) {
-            return List.of();
-        }
-        var extractedStacks = machine.extractAll(false);
-        var extracted = resources(extractedStacks);
-        if (extracted.isEmpty()) {
-            return List.of();
-        }
-        if (!cache.storeAll(extracted)) {
-            var rejected = machine.insertAll(extractedStacks);
-            if (!rejected.isEmpty()) {
-                machine.dropItems(rejected);
+    /**
+     * Restores the cache after a partial exact bus push: re-extracts what was
+     * inserted and folds the never-inserted remainder back in. Returns false so
+     * the blocking action retries on the next tick.
+     */
+    private boolean recoverPartialBusPush(
+            MEStorage storage,
+            List<FactoryResource> requested,
+            List<FactoryResource> inserted) {
+        var recovered = new ArrayList<FactoryResource>();
+        for (var resource : inserted) {
+            var amount = storage.extract(
+                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
+            if (amount > 0) {
+                recovered.add(new FactoryResource(resource.key(), amount));
             }
-            return List.of();
         }
-        job.addOwned(extracted);
-        changed.run();
-        return extracted;
+        recovered.addAll(subtract(requested, inserted));
+        if (!cache.storeAll(recovered)) {
+            throw new IllegalStateException("Cannot restore a partially rejected bus push");
+        }
+        var lost = subtract(requested, recovered);
+        if (!lost.isEmpty()) {
+            throw new IllegalStateException("External storage violated insertion simulation");
+        }
+        return false;
+    }
+
+    /** Returns the inserted resources back to the target after a failed transfer. */
+    private static void rollbackBusInsertion(MEStorage storage, List<FactoryResource> inserted) {
+        for (var resource : inserted) {
+            var extracted = storage.extract(
+                    resource.key(), resource.amount(), Actionable.MODULATE, BUS_SOURCE);
+            if (extracted != resource.amount()) {
+                throw new IllegalStateException(
+                        "Cannot roll back partial external storage insertion");
+            }
+        }
     }
 
     private boolean pushToNetwork(
@@ -509,6 +567,13 @@ public final class FactoryActionExecutor {
             NetworkEndpoint storage, List<FactoryResource> resources) {
         return resources.stream().allMatch(resource -> storage.storage.insert(
                 resource.key(), resource.amount(), Actionable.SIMULATE, storage.source)
+                == resource.amount());
+    }
+
+    private static boolean canInsertAll(
+            MEStorage storage, List<FactoryResource> resources) {
+        return resources.stream().allMatch(resource -> storage.insert(
+                resource.key(), resource.amount(), Actionable.SIMULATE, BUS_SOURCE)
                 == resource.amount());
     }
 

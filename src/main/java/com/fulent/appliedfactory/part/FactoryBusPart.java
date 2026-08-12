@@ -9,7 +9,7 @@ import org.jetbrains.annotations.Nullable;
 
 import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
-import com.fulent.appliedfactory.factory.FactoryMachineAccess;
+import com.fulent.appliedfactory.factory.FactoryBusTarget;
 import com.fulent.appliedfactory.menu.FactoryBusMenu;
 
 import appeng.api.ids.AEItemIds;
@@ -48,7 +48,7 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.extensions.IPlayerExtension;
 
 /**
- * A channel-using AE cable part that exposes the adjacent machine to factory
+ * A channel-using AE cable part that exposes the adjacent block to factory
  * controller programs.
  */
 public final class FactoryBusPart
@@ -316,11 +316,11 @@ public final class FactoryBusPart
         return 0;
     }
 
-    public Optional<FactoryMachineAccess> machine() {
+    public Optional<FactoryBusTarget> target() {
         if (hostBlockEntity == null || hostBlockEntity.getLevel() == null || side == null) {
             return Optional.empty();
         }
-        return Optional.of(new FactoryMachineAccess(
+        return Optional.of(new FactoryBusTarget(
                 hostBlockEntity.getLevel(),
                 hostBlockEntity.getBlockPos().relative(side),
                 side));
@@ -337,7 +337,7 @@ public final class FactoryBusPart
     }
 
     public Optional<ResourceLocation> targetBlockId() {
-        return machine().map(FactoryMachineAccess::blockId);
+        return target().map(FactoryBusTarget::blockId);
     }
 
     @Nullable

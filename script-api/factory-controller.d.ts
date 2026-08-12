@@ -12,13 +12,30 @@ type NbtValue = string | number | boolean
     | Readonly<Record<string, NbtValue>>
     | null;
 
+/**
+ * An AE2 key channel. The value is the AE key type's registry id (`"ae2:i"`,
+ * `"ae2:f"`, or any id an addon registers, e.g. `"mekanism:chemical"`); the
+ * friendly aliases `"item"` and `"fluid"` are also accepted.
+ */
+type ResourceChannel = string;
+
 interface Resource {
     readonly id: string;
     readonly amount: number;
 
     matches(selector: string): boolean;
-    /** Read-only snapshot of this item's full saved NBT ({@code {id, count, components}}). */
+    /**
+     * Read-only snapshot of this resource's key data: an item's full saved NBT
+     * ({@code {id, count, components}}), a fluid's saved fluid stack, or an
+     * empty object for other channels.
+     */
     nbt(): Readonly<Record<string, NbtValue>>;
+    /**
+     * The exact AE key as a serialized generic tag (SNBT). Reconstructable with
+     * {@code stackTag(tag, amount)}; useful for channels that have no id-based
+     * spec constructor (e.g. Applied Flux energy).
+     */
+    keyTag(): string;
 }
 
 /** A resource currently owned by this workflow and therefore valid for `push`. */
@@ -62,20 +79,25 @@ interface BusState {
     readonly config: Readonly<Record<string, string | number | boolean | null>>;
 }
 
-interface BusItems {
+/** Storage handle for one key channel exposed by the bus's target block. */
+interface BusStorage {
+    /** Snapshot of everything the target currently exposes on this channel. */
     read(): readonly Resource[];
     /**
      * Blocks until the target accepts the exact full resource list in one shot,
      * then returns `true`. Retried every server tick; never transfers partially.
+     * All resources must belong to this handle's channel.
      */
     push(resources: OwnedResource | readonly OwnedResource[]): true;
     /**
      * Blocks, transferring as much as the target accepts each tick, until the
      * entire resource list is inside the target; returns `true` when done.
+     * All resources must belong to this handle's channel.
      */
     pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
     /** Queries whether the target can accept the exact full list right now. */
     canPush(resources: Resource | readonly Resource[]): boolean;
+    /** Extracts everything the target currently exposes on this channel. */
     extract(): readonly OwnedResource[];
 }
 
@@ -87,7 +109,12 @@ interface Bus {
     exists(): boolean;
     state(): BusState | null;
     target(): BlockView | null;
-    items(): BusItems | null;
+    /** Storage handle for one key channel, or null when the target exposes none. */
+    storage(channel: ResourceChannel): BusStorage | null;
+    /** The item-channel storage handle; sugar for {@code storage("item")}. */
+    items(): BusStorage | null;
+    /** The AE key channels this bus's target currently exposes (with a storage strategy). */
+    channels(): readonly ResourceChannel[];
     detect(selector: string): boolean;
 
     /** Releases the complete owned resource list as item entities from this bus. */
@@ -107,7 +134,8 @@ interface Bus {
     redstone(level: number): boolean;
 }
 
-interface NetworkItems {
+/** Storage handle for one key channel of an AE network. */
+interface NetworkStorage {
     /**
      * Blocks until the network accepts the exact full resource list, then returns
      * `true`. Retried every server tick; never transfers partially.
@@ -121,11 +149,11 @@ interface NetworkItems {
     /** Queries whether the network can accept the exact full list right now. */
     canPush(resources: Resource | readonly Resource[]): boolean;
     extract(requests: Resource | readonly Resource[]): readonly OwnedResource[];
-    /** Snapshot of everything this network can currently supply; read-only resources. */
+    /** Snapshot of everything this network can currently supply on this channel. */
     read(): readonly Resource[];
     /**
-     * Counts items matching a string selector (item id or {@code #tag}, any data
-     * components) or an exact {@code item(id, amount[, nbt])} resource key.
+     * Counts matching resources on this channel: a string selector (resource id
+     * or {@code #tag}, any data components) or an exact resource key.
      */
     count(spec: string | Resource): number;
 }
@@ -135,7 +163,12 @@ interface Network {
     readonly buses: readonly Bus[];
 
     online(): boolean;
-    items(): NetworkItems;
+    /** Storage handle for one key channel of this network. */
+    storage(channel: ResourceChannel): NetworkStorage;
+    /** The item-channel storage handle; sugar for {@code storage("item")}. */
+    items(): NetworkStorage;
+    /** Every AE key channel registered in AE2 (item, fluid, addon channels). */
+    channels(): readonly ResourceChannel[];
 }
 
 interface BaseContext {
@@ -191,6 +224,20 @@ interface ControllerHandlerDefinition {
 }
 
 declare function item(id: string, amount: number, nbt?: object): Resource;
+/**
+ * Creates an exact resource of any registered AE key channel. `channel` is the
+ * AE key type id (`"ae2:i"`, `"ae2:f"`, or an addon channel id) or a friendly
+ * alias (`"item"`, `"fluid"`). The optional `nbt` is a data component patch
+ * object for item/fluid channels.
+ */
+declare function stack(channel: ResourceChannel, id: string, amount: number, nbt?: object): Resource;
+/**
+ * Creates an exact resource from a serialized generic AE key tag (as returned by
+ * {@code resource.keyTag()}). Works for any registered channel without per-channel
+ * adapter code — the fallback for channels whose key cannot be expressed as a
+ * plain id (e.g. Applied Flux energy: {@code stackTag('{"#t":"appflux:flux",type:"FE"}', n)}).
+ */
+declare function stackTag(tag: string, amount: number): Resource;
 declare function initialize(definition: InitializerDefinition): void;
 declare function registerPatterns(definition: PatternRegistration): void;
 declare function registerControllerHandler(definition: ControllerHandlerDefinition): void;

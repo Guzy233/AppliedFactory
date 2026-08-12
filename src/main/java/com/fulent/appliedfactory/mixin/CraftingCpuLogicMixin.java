@@ -30,10 +30,11 @@ import net.minecraft.world.level.Level;
  *       id is captured into {@link CraftingRequestContext} so the factory can stamp its jobs.
  *   <li>{@code finishJob(success)} is the single funnel for every end of a crafting request
  *       ({@code cancel()}, the canceled-link tick check, {@code ICraftingCPU.cancelJob()}, and a
- *       successful completion once all requested outputs are delivered). The owning controllers on
- *       the CPU's grid are told the request id so they can cancel their matching jobs: a successful
- *       finish means the request's outputs are already satisfied, possibly supplied by another
- *       source, so any still-running factory job for that request is redundant.
+ *       successful completion once all requested outputs are delivered). A non-successful finish
+ *       tells the owning controllers on the CPU's grid the request id so they can cancel their
+ *       matching jobs. A successful finish does NOT cancel anything: the workflow itself delivers
+ *       the outputs and finishes normally on its own, and killing it mid-run would discard a
+ *       still-valid continuation and churn its owned resources.
  * </ul>
  */
 @Mixin(CraftingCpuLogic.class)
@@ -63,6 +64,12 @@ public abstract class CraftingCpuLogicMixin {
 
     @Inject(method = "finishJob", at = @At("HEAD"))
     private void factoryNotifyCraftingRequestFinished(boolean success, CallbackInfo ci) {
+        // A successful finish means the request's outputs are already delivered (by the job that
+        // pushed them); that job finishes on its own. Only cancelled/failed requests should cancel
+        // the still-running factory jobs that were stamped with this request id.
+        if (success) {
+            return;
+        }
         try {
             var craftingId = craftingIdOf((CraftingCpuLogic) (Object) this);
             if (craftingId == null) {

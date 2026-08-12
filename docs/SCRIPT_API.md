@@ -222,7 +222,12 @@ interface Network {
   readonly buses: readonly Bus[];
 
   online(): boolean;
-  items(): NetworkItems;
+  // 指定 AE 资源通道的存储句柄；read/count 按该通道过滤，push/extract 作用于整个网络存储。
+  storage(channel: ResourceChannel): NetworkStorage;
+  // 物品通道存储句柄：storage("item") 的糖。
+  items(): NetworkStorage;
+  // AE2 中注册的全部 AE 通道 id（含附属通道），用于枚举网络能读写哪些资源类型。
+  channels(): readonly ResourceChannel[];
 }
 ```
 
@@ -315,7 +320,12 @@ interface Bus {
   exists(): boolean;
   state(): BusState | null;
   target(): BlockView | null;
-  items(): BusItems | null;
+  // 指定 AE 资源通道的存储句柄；目标方块没有该通道存储时返回 null。
+  storage(channel: ResourceChannel): BusStorage | null;
+  // 物品通道存储句柄：storage("item") 的糖。
+  items(): BusStorage | null;
+  // 该 bus 目标当前暴露的 AE 通道 id（已注册世界存储策略的通道，按能力探测）。
+  channels(): readonly ResourceChannel[];
 
   detect(selector: string): boolean;
   drop(resources: OwnedResource | readonly OwnedResource[]): boolean;
@@ -415,18 +425,36 @@ Bus 损坏或移动后旧句柄不会自动换地址。需要重选时，脚本�
 
 ## 9. 资源
 
-第一阶段只公开物品资源：
+资源统一由 AE2 的资源通道（AEKeyType）参数化。`item` 是物品通道的糖，`stack` 接受任意已注册通道：
 
 ```js
 item("minecraft:iron_ore", 1)
 item("minecraft:iron_ingot", 1)
 // 可选第三参：精确数据组件（Data Components），见下。
 item("minecraft:iron_pickaxe", 1, { "minecraft:enchantments": { levels: { "minecraft:efficiency": 5 } } })
+
+// 通用构造：stack(channel, id, amount[, nbt])
+stack("item", "minecraft:iron_ingot", 1)               // 等价 item(...)
+stack("fluid", "minecraft:water", 1000)                // 流体通道（毫桶）
+stack("ae2:f", "minecraft:lava", 1000)                 // 通道也可用 AE2 注册表 id
+// 其他 mod 注册的通道（化学品、能源元件等）：
+// stack("<mod>:<channelId>", "<resourceId>", amount[, nbt])
 ```
 
-`item` 在样板注册和 Network 精确提取时创建不可变资源请求。不带 `nbt` 时请求的是默认组件；带 `nbt` 时请求的是携带该组件补丁的精确 AE key。
+`channel` 是 AE key 类型的注册表 id（物品 `ae2:i`、流体 `ae2:f`，或任意附属注册的通道 id），也接受友好别名 `"item"` / `"fluid"`。`stack` 在样板注册和 Network 精确提取时创建不可变资源请求。不带 `nbt` 时请求的是默认组件；带 `nbt` 时请求的是携带该组件补丁的精确 AE key。
+
+`stack` 对任意已注册通道都是零代码适配：有解析器的通道（item/fluid 支持组件补丁）用解析器；没有解析器的通道回退到 AE2 通用反解 `{"id": ...}`（凡 key codec 以 `"id"` 字段存主 id 的通道，如 AppMek 化学品 `stack("appmek:chemical", "mekanism:carbon", 10)`，无需任何适配代码）。个别 key codec 字段特殊的通道（如 Applied Flux 能源用 `"type"` 字段）无法由 id 构造，改用序列化 tag：
+
+```js
+// 从探测脚本（或 resource.keyTag()）拿到精确的序列化 tag
+stackTag('{"#t":"appflux:flux",type:"FE"}', 20000)
+```
+
+`resource.keyTag()` 返回该资源精确 AE key 的通用序列化 tag（SNBT），可用 `stackTag(tag, amount)` 原样重建，适用于任意通道。这样新增资源类型时既不需要编译依赖、也不需要写 per-channel 适配类。
 
 ```ts
+type ResourceChannel = string; // "item" | "fluid" | "<mod>:<channelId>"
+
 type NbtValue = string | number | boolean | readonly NbtValue[]
     | Readonly<Record<string, NbtValue>> | null;
 
@@ -435,7 +463,7 @@ interface Resource {
   readonly amount: number;
 
   matches(selector: string): boolean;
-  // 该物品完整存档 NBT 的只读快照：{ id, count, components }。
+  // 该资源 key 数据的只读快照：物品是 { id, count, components }，流体是流体栈存档，其他通道为空对象。
   nbt(): Readonly<Record<string, NbtValue>>;
 }
 
@@ -482,14 +510,18 @@ const stillOwned = ctx.owned;
 - workflow 正常返回或失败后，框架尝试把仍持有的资源退回下单网络或其已经使用过的恢复网络；网络不可用时资源继续留在缓存中，不会随 JS 变量回收而消失；
 - 控制器被破坏时直接掉落带有实际内容的存储元件，不能再额外实体化账本资源，避免复制。
 
-没有兼容存储元件时，`BusItems.extract()` 与 `NetworkItems.extract()` 返回空数组，AE processing 下单则不被控制器接受。`push` 操作消费的是已经位于缓存中的 owned resource，因此不会凭空构造物品。
+没有兼容存储元件时，`BusStorage.extract()` 与 `NetworkStorage.extract()` 返回空数组，AE processing 下单则不被控制器接受。`push` 操作消费的是已经位于缓存中的 owned resource，因此不会凭空构造物品。缓存与 AE 存储元件一样天然跨通道：只要元件支持对应资源类型（物品元件、流体元件、附加通道元件），该通道就能被存入。
 
 第一阶段不提供 `slice`、`split`、部分所有权结果或脚本构造任意 component patch。需要不同数量时直接在 AE processing pattern 中编码对应数量。
 
-## 10. Bus 物品 API
+## 10. Bus 存储 API
+
+Bus 的存储按 AE 资源通道参数化：`bus.storage(channel)` 返回该通道的存储句柄，`bus.items()` 是物品通道的糖。句柄内部只保存 Bus 地址与通道，每次调用都重新解析当前世界的目标能力；目标方块没有该通道存储时返回 `null`。
+
+通道适配由 AE2 自身的 `ExternalStorageStrategy` 注册表完成（`StackWorldBehaviors`）：物品、流体免费支持，任何为 AE2 注册了世界存储策略的附加通道（化学品、能源元件等）自动接入，本 mod 无需逐类型适配代码。
 
 ```ts
-interface BusItems {
+interface BusStorage {
   read(): readonly Resource[];
   push(resources: OwnedResource | readonly OwnedResource[]): true;
   pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
@@ -498,20 +530,22 @@ interface BusItems {
 }
 ```
 
+`push` / `pushTillFull` / `canPush` 只接受该句柄通道内的资源；混入其他通道的资源会抛出脚本错误。`extract()` 提取该通道在当前目标面上可提取的全部资源。
+
 ### 10.1 `read()`
 
-返回调用时该目标面可见的物品快照，不修改世界。脚本可以用普通数组方法检查内容。返回值只是观察值，不能传给 `push`。
+返回调用时该目标面该通道可见的资源快照，不修改世界。脚本可以用普通数组方法检查内容。返回值只是观察值，不能传给 `push`。
 
 ### 10.2 `push(resources)`
 
-挂起并向这个 Bus 地址精确推送给定的完整资源集合，**每服务端 tick 重试一次，直到全部数量一次性被目标接受后才返回 `true`**：
+挂起并向这个 Bus 地址精确推送给定资源的完整集合到该通道存储，**每服务端 tick 重试一次，直到全部数量一次性被目标接受后才返回 `true`**：
 
 - 只在目标能完整接收时推送，不允许部分成功；
 - 推送失败时脚本不会恢复，同一动作在下一 tick 重试；
 - 目标持续无法接收（消失、capability 不存在或容量不足）时，workflow 一直挂起在调用点；
 - 需要非阻塞判断时先用 `canPush` 查询，再决定是否等待。
 
-参数非法、资源不属于当前 workflow 或资源数量已被消费时抛出脚本错误。这与 AE 下单语义一致：AE 的 processing 任务同样在目标无法接收全部输入时等待。
+参数非法、资源不属于当前 workflow、资源数量已被消费或通道不符时抛出脚本错误。这与 AE 下单语义一致：AE 的 processing 任务同样在目标无法接收全部输入时等待。
 
 ### 10.3 `pushTillFull(resources)`
 
@@ -530,22 +564,22 @@ interface BusItems {
 
 ### 10.5 `extract()`
 
-无参数提取该目标面此刻可提取的全部物品：
+无参数提取该目标面该通道此刻可提取的全部资源：
 
 - 返回实际提取并由 workflow 拥有的资源数组；
-- 没有物品、目标消失或 capability 不存在时返回空数组；
+- 没有资源、目标消失或该通道能力不存在时返回空数组；
 - 不传 selector、期望数量或 timeout；
 - 不等待产物，不判断批次归属；
 - 一次调用只尝试一次。
 
-这种语义适合“机器输出面有什么就全部送回网络”的主要用例。需要区分机器内部不同产物时，先通过方块的物理侧面、Bus 配置或专用脚本解决；第一阶段不为它设计复杂提取结果。
+这种语义适合"机器输出面有什么就全部送回网络"的主要用例。需要区分机器内部不同产物时，先通过方块的物理侧面、Bus 配置或专用脚本解决；第一阶段不为它设计复杂提取结果。
 
-## 11. Network 物品 API
+## 11. Network 存储 API
 
-Bus 与 AE 网络不强行实现同一个存储接口。二者都支持精确 `push`，但提取语义不同：从机器输出面可以无条件全部取出，从大型 AE 网络无条件清空显然不安全。
+Bus 与 AE 网络不强行实现同一个存储接口。二者都支持精确 `push`，但提取语义不同：从机器输出面可以无条件全部取出，从大型 AE 网络无条件清空显然不安全。`network.storage(channel)` 返回按通道过滤视图的存储句柄，`network.items()` 是物品通道的糖。
 
 ```ts
-interface NetworkItems {
+interface NetworkStorage {
   push(resources: OwnedResource | readonly OwnedResource[]): true;
   pushTillFull(resources: OwnedResource | readonly OwnedResource[]): true;
   canPush(resources: Resource | readonly Resource[]): boolean;
@@ -555,7 +589,9 @@ interface NetworkItems {
 }
 ```
 
-### 11.1 `network.items().push(resources)`
+`push` / `pushTillFull` / `canPush` / `extract` 作用于整个 AE 网格存储（天然跨通道），不限制句柄通道；`read()` 与 `count()` 按句柄通道过滤。混入其他通道的资源在 `push`/`extract` 中正常工作。
+
+### 11.1 `network.storage(channel).push(resources)`
 
 挂起并向指定 AE 网络精确推送完整资源集合，**每 tick 重试直到全部数量一次性被网络接受后返回 `true`**：
 
@@ -563,19 +599,19 @@ interface NetworkItems {
 - 网络离线、满仓或无法完整接收时持续挂起重试；
 - 不自动改送下单网络或其他控制器面。
 
-### 11.2 `network.items().pushTillFull(resources)`
+### 11.2 `network.storage(channel).pushTillFull(resources)`
 
-挂起并每 tick 向网络推送当前能接受的部分输入，直到整个资源列表全部进入网络后返回 `true`。与 `bus.items().pushTillFull` 语义一致，用于把产出逐步回流到大型网络。
+挂起并每 tick 向网络推送当前能接受的部分输入，直到整个资源列表全部进入网络后返回 `true`。与 `bus.storage(channel).pushTillFull` 语义一致，用于把产出逐步回流到大型网络。
 
-### 11.3 `network.items().canPush(resources)`
+### 11.3 `network.storage(channel).canPush(resources)`
 
 同步查询，不挂起、不转移资源：返回该网络当前能否一次性接受精确的完整资源列表。`resources` 可以是普通资源规格。
 
-### 11.4 `network.items().extract(requests)`
+### 11.4 `network.storage(channel).extract(requests)`
 
 这是被动生产从 AE 网络取得输入所需的最小能力：
 
-- `requests` 必须是精确物品与精确数量；
+- `requests` 必须是精确资源与精确数量；
 - 网络能完整提供时返回对应 `OwnedResource[]`；
 - 数量不足、网络离线或请求不可用时返回空数组；
 - 不支持标签请求、部分数量或复杂结果对象。
@@ -588,14 +624,17 @@ if (!source.online()) return;
 
 const ores = source.items().extract(item("minecraft:iron_ore", 1));
 if (ores.length === 0) return;
+
+// 流体同理：
+const water = source.storage("fluid").extract(stack("fluid", "minecraft:water", 1000));
 ```
 
-### 11.5 `network.items().read()` 与 `network.items().count(spec)`
+### 11.5 `network.storage(channel).read()` 与 `.count(spec)`
 
-两个同步只读操作，不改变网络、不转移资源，也不触发挂起。它们读取当前 tick 该 AE 网格可提供的物品：
+两个同步只读操作，不改变网络、不转移资源，也不触发挂起。它们读取当前 tick 该 AE 网格在句柄通道内可提供的资源：
 
-- `read()` 返回当前可提供物品的独立快照数组，元素是观察值（不能传给 `push`）；
-- `count(spec)` 返回匹配数量；`spec` 为字符串时按物品 id 或 `#tag` 宽松匹配（不区分数据组件），为 `item(...)` 资源对象时精确匹配其 AE key（`item(id, amount, nbt)` 可用于按组件统计）。
+- `read()` 返回当前可提供资源的独立快照数组，元素是观察值（不能传给 `push`）；
+- `count(spec)` 返回匹配数量；`spec` 为字符串时按资源 id 或 `#tag` 宽松匹配（不区分数据组件，tag 按资源自身通道解析），为资源对象时精确匹配其 AE key（`stack(channel, id, amount, nbt)` 可用于按组件统计）。
 
 网络离线或未接线时 `read()` 返回空数组、`count(spec)` 返回 `0`。`read()` 与 `count()` 是同步只读操作，processing/passive workflow 与 initializer（仅限其声明监听的网络）都可以调用。
 
@@ -603,6 +642,9 @@ if (ores.length === 0) return;
 const north = ctx.network("north");
 if (north.online() && north.items().count("minecraft:iron_ingot") < 64) {
   // 铸造更多铁锭。
+}
+if (north.online() && north.storage("fluid").count("minecraft:water") < 8000) {
+  // 补充水。
 }
 ```
 
@@ -870,7 +912,7 @@ registerControllerHandler({
 - 自动换 Bus、自动换网络或参数重新求值（`push`/`pushTillFull` 只对选定地址等待重试，不重新选择目标）；
 - 独立并发的 `setTimeout(callback)` 定时任务；
 - Bus UUID、移动后保持身份或预期 block ID 校验；
-- 流体端点、任意世界操作；
+- 能量(FE)资源——AE2 把能量视为独立 grid 服务而不是 AE key 通道，因此不走本 API；除非附属把它做成可存储的 AEKeyType；
 - `break(tool)` 的耐久扣减（工具当前只借用不消耗）；
 - 默认机器并发锁；
 - 根据 Rhino 实际内存动态计算 crafting CPU bytes。

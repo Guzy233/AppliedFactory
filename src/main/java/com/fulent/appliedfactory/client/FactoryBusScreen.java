@@ -50,7 +50,7 @@ public final class FactoryBusScreen extends AbstractContainerScreen<FactoryBusMe
                 : part.targetBlockId().map(Object::toString).orElse("?");
         var redstone = part == null
                 ? 0
-                : part.machine().map(machine -> machine.redstoneLevel()).orElse(0);
+                : part.target().map(accessed -> accessed.redstoneLevel()).orElse(0);
         graphics.drawString(font,
                 Component.translatable("gui.appliedfactory.factory_bus.target", target),
                 8, 19, 0xffe0e0e0, false);

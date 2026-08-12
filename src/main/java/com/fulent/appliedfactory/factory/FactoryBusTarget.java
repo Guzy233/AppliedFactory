@@ -1,7 +1,9 @@
 package com.fulent.appliedfactory.factory;
 
-import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.jetbrains.annotations.Nullable;
@@ -19,7 +21,6 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.Containers;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
@@ -32,34 +33,47 @@ import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.CommonHooks;
 import net.neoforged.neoforge.common.util.FakePlayer;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
-import net.neoforged.neoforge.capabilities.Capabilities;
-import net.neoforged.neoforge.items.IItemHandler;
+
+import appeng.api.behaviors.ExternalStorageStrategy;
+import appeng.api.stacks.AEKeyType;
+import appeng.api.storage.MEStorage;
+import appeng.parts.automation.StackWorldBehaviors;
 
 /**
- * Capability-based access to the machine face targeted by a factory bus.
+ * Capability-based access to the block face targeted by a factory bus.
  *
- * <p>
- * This class deliberately contains no AE or scripting concepts. The job
- * runtime exposes a narrow wrapper around it to Rhino without teaching the part
- * about recipes or callbacks.
- * </p>
+ * <p>The target is not required to be a machine at all — it may be any block
+ * or even air. World-state operations ({@code use}, {@code place},
+ * {@code break}) are inherently item-centric because they physically interact
+ * with block entities and item entities. Resource storage, however, is exposed
+ * per AE2 key channel through AE2's own
+ * {@link ExternalStorageStrategy external storage strategy} registry
+ * ({@link StackWorldBehaviors}): every channel that AE2 or an addon registers a
+ * strategy for (items, fluids, addon chemicals/energy cells, ...) is adapted to
+ * an {@link MEStorage} automatically, with no per-type code in this class.</p>
  */
-public final class FactoryMachineAccess {
+public final class FactoryBusTarget {
     private static final GameProfile FACTORY_ACTOR = new GameProfile(
             UUID.fromString("e54ef5e3-87f3-4b98-a2c7-3465c3e1b5e4"), "[ME Factory Manager]");
     private static final net.minecraft.world.item.Item MINING_TOOL = Items.DIAMOND_PICKAXE;
+    private static final Runnable NO_CHANGE_LISTENER = () -> {
+    };
 
     private final Level level;
     private final BlockPos position;
     private final Direction accessDirection;
+    @Nullable
+    private Map<AEKeyType, ExternalStorageStrategy> strategies;
 
     /**
      * @param level           The world containing the target block
      * @param position        The target block's position
-     * @param accessDirection The direction from the bus toward the target (used for
-     *                        capability queries)
+     * @param accessDirection The direction of the factory bus on its host, pointing
+     *                        from the host toward the target block. All capability
+     *                        and world queries use {@link #targetFace()}, the face
+     *                        of the target the bus actually touches.
      */
-    public FactoryMachineAccess(Level level, BlockPos position, Direction accessDirection) {
+    public FactoryBusTarget(Level level, BlockPos position, Direction accessDirection) {
         this.level = level;
         this.position = position.immutable();
         this.accessDirection = accessDirection;
@@ -70,16 +84,17 @@ public final class FactoryMachineAccess {
     }
 
     /**
-     * Returns the direction from the bus toward the target block.
-     * This is the direction used for capability queries.
+     * The direction of the bus on its host, pointing from the host toward the
+     * target block.
      */
     public Direction accessDirection() {
         return accessDirection;
     }
 
     /**
-     * Returns the face of the target block being accessed.
-     * This is the opposite of the access direction.
+     * The face of the target block being accessed, i.e. the face the bus touches
+     * (the opposite of {@link #accessDirection}). Capability queries and world
+     * interactions all use this face.
      */
     public Direction targetFace() {
         return accessDirection.getOpposite();
@@ -106,7 +121,7 @@ public final class FactoryMachineAccess {
     }
 
     public int redstoneLevel() {
-        return level.getSignal(position, accessDirection);
+        return level.getSignal(position, targetFace());
     }
 
     /** Tests the current target block against one exact block id or #block tag. */
@@ -121,6 +136,8 @@ public final class FactoryMachineAccess {
         var selectorId = ResourceLocation.tryParse(selector);
         return selectorId != null && selectorId.equals(blockId());
     }
+
+    // ---- World operations (item-centric) ------------------------------------
 
     /** Uses the target block with an empty-handed MFM fake player. */
     public boolean use() {
@@ -240,7 +257,7 @@ public final class FactoryMachineAccess {
         if (!(level instanceof ServerLevel serverLevel) || stacks.isEmpty()) {
             return false;
         }
-        var launchDirection = accessDirection.getOpposite();
+        var launchDirection = targetFace();
         var spawn = Vec3.atCenterOf(position).add(
                 launchDirection.getStepX() * 0.35D,
                 launchDirection.getStepY() * 0.35D,
@@ -260,208 +277,47 @@ public final class FactoryMachineAccess {
         return true;
     }
 
-    public boolean hasItemStorage() {
-        return itemHandler() != null;
-    }
-
-    public List<ItemStack> items() {
-        var handler = itemHandler();
-        if (handler == null) {
-            return List.of();
-        }
-
-        var result = new ArrayList<ItemStack>(handler.getSlots());
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            var stack = handler.getStackInSlot(slot);
-            if (!stack.isEmpty()) {
-                result.add(stack.copy());
-            }
-        }
-        return List.copyOf(result);
-    }
-
-    public long countItem(ResourceLocation itemId) {
-        long count = 0;
-        for (var stack : items()) {
-            if (itemId.equals(BuiltInRegistries.ITEM.getKey(stack.getItem()))) {
-                count += stack.getCount();
-            }
-        }
-        return count;
-    }
-
-    /** Total items currently visible through this physical machine face. */
-    public long storedItemCount() {
-        long count = 0;
-        for (var stack : items()) {
-            count = Math.addExact(count, stack.getCount());
-        }
-        return count;
-    }
+    // ---- Generic per-channel storage facade --------------------------------
 
     /**
-     * Counts only matching items that this machine face actually permits
-     * extracting.
+     * Returns the {@link MEStorage} AE2's strategy registry produces for one key
+     * channel on this target face, or null when the channel has no registered
+     * strategy or the target exposes no matching capability. Both the channel
+     * space and the capability adapters are owned by AE2, so third-party channels
+     * are picked up automatically.
      */
-    public long countExtractable(ItemStack template) {
-        var handler = itemHandler();
-        if (handler == null || template.isEmpty()) {
-            return 0;
-        }
-
-        long count = 0;
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            var candidate = handler.getStackInSlot(slot);
-            if (!ItemStack.isSameItemSameComponents(candidate, template)) {
-                continue;
-            }
-            var extracted = handler.extractItem(slot, Integer.MAX_VALUE, true);
-            if (ItemStack.isSameItemSameComponents(extracted, template)) {
-                count += extracted.getCount();
-            }
-        }
-        return count;
-    }
-
-    /** Returns the remainder that the target rejected. */
-    public ItemStack insert(ItemStack stack, boolean simulate) {
-        var handler = itemHandler();
-        if (handler == null || stack.isEmpty()) {
-            return stack.copy();
-        }
-
-        var remainder = stack.copy();
-        for (int slot = 0; slot < handler.getSlots() && !remainder.isEmpty(); slot++) {
-            remainder = handler.insertItem(slot, remainder, simulate);
-        }
-        return remainder;
-    }
-
-    /**
-     * Simulates the complete recipe batch against one virtual inventory snapshot.
-     */
-    public boolean canInsertAll(List<ItemStack> stacks) {
-        var handler = itemHandler();
-        if (handler == null) {
-            return false;
-        }
-
-        var slots = virtualSlots(handler);
-        for (var stack : stacks) {
-            if (!stack.isEmpty()
-                    && insertIntoVirtual(handler, slots, stack, stack.getCount()) > 0) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** Capacity available for one resource after an already planned local batch. */
-    public long additionalInsertable(
-            List<ItemStack> planned, ItemStack template, long requestedAmount) {
-        var handler = itemHandler();
-        if (handler == null || template.isEmpty() || requestedAmount <= 0) {
-            return 0;
-        }
-
-        var slots = virtualSlots(handler);
-        for (var stack : planned) {
-            if (!stack.isEmpty()
-                    && insertIntoVirtual(handler, slots, stack, stack.getCount()) > 0) {
-                return 0;
-            }
-        }
-        return requestedAmount
-                - insertIntoVirtual(handler, slots, template, requestedAmount);
-    }
-
-    /**
-     * Commits a previously simulated batch and returns anything unexpectedly
-     * rejected by the target. Callers retain ownership of returned stacks.
-     */
-    public List<ItemStack> insertAll(List<ItemStack> stacks) {
-        var rejected = new ArrayList<ItemStack>();
-        for (var stack : stacks) {
-            var remainder = insert(stack, false);
-            if (!remainder.isEmpty()) {
-                rejected.add(remainder.copy());
-            }
-        }
-        return List.copyOf(rejected);
-    }
-
-    /**
-     * Emergency preservation path for a handler that violates simulation semantics.
-     */
-    public void dropItems(List<ItemStack> stacks) {
-        if (level.isClientSide) {
-            return;
-        }
-        for (var stack : stacks) {
-            if (!stack.isEmpty()) {
-                Containers.dropItemStack(level, position.getX(), position.getY(), position.getZ(), stack);
-            }
-        }
-    }
-
-    /**
-     * Extracts stacks matching the template, preserving components and slot
-     * boundaries. The returned stacks are detached copies owned by the caller.
-     */
-    public List<ItemStack> extract(ItemStack template, int amount, boolean simulate) {
-        if (amount <= 0 || template.isEmpty()) {
-            return List.of();
-        }
-
-        var handler = itemHandler();
-        if (handler == null) {
-            return List.of();
-        }
-
-        var remaining = amount;
-        var result = new ArrayList<ItemStack>();
-        for (int slot = 0; slot < handler.getSlots() && remaining > 0; slot++) {
-            var candidate = handler.getStackInSlot(slot);
-            if (!ItemStack.isSameItemSameComponents(candidate, template)) {
-                continue;
-            }
-
-            var extracted = handler.extractItem(slot, remaining, simulate);
-            if (!extracted.isEmpty()) {
-                result.add(extracted.copy());
-                remaining -= extracted.getCount();
-            }
-        }
-        return List.copyOf(result);
-    }
-
-    /** Extracts every stack currently permitted by this sided capability. */
-    public List<ItemStack> extractAll(boolean simulate) {
-        var handler = itemHandler();
-        if (handler == null) {
-            return List.of();
-        }
-
-        var result = new ArrayList<ItemStack>();
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            var extracted = handler.extractItem(slot, Integer.MAX_VALUE, simulate);
-            if (!extracted.isEmpty()) {
-                result.add(extracted.copy());
-            }
-        }
-        return List.copyOf(result);
-    }
-
     @Nullable
-    private IItemHandler itemHandler() {
-        if (!isLoaded()) {
+    public MEStorage storage(AEKeyType type) {
+        if (!(level instanceof ServerLevel serverLevel)) {
             return null;
         }
-        // Use the access direction for capability queries. For sided machines like
-        // furnaces,
-        // this determines which slots are exposed (e.g., furnace top = input, bottom =
-        // output).
-        return level.getCapability(Capabilities.ItemHandler.BLOCK, position, accessDirection);
+        var strategy = strategies(serverLevel).get(type);
+        return strategy == null ? null : strategy.createWrapper(false, NO_CHANGE_LISTENER);
+    }
+
+    /**
+     * The key channels this target face currently exposes. Used by the controller
+     * topology fingerprint so a capability set change re-runs initializers.
+     */
+    public Set<AEKeyType> channels() {
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return Set.of();
+        }
+        var result = new LinkedHashSet<AEKeyType>();
+        for (var entry : strategies(serverLevel).entrySet()) {
+            if (entry.getValue().createWrapper(false, NO_CHANGE_LISTENER) != null) {
+                result.add(entry.getKey());
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private Map<AEKeyType, ExternalStorageStrategy> strategies(ServerLevel serverLevel) {
+        if (strategies == null) {
+            strategies = StackWorldBehaviors.createExternalStorageStrategies(
+                    serverLevel, position, targetFace());
+        }
+        return strategies;
     }
 
     @Nullable
@@ -471,7 +327,7 @@ public final class FactoryMachineAccess {
         }
         var player = FakePlayerFactory.get(serverLevel, FACTORY_ACTOR);
         player.setGameMode(GameType.SURVIVAL);
-        var actorDirection = accessDirection;
+        var actorDirection = targetFace();
         var actorPosition = Vec3.atCenterOf(position).add(
                 actorDirection.getStepX() * 1.25D,
                 actorDirection.getStepY() * 1.25D,
@@ -481,11 +337,12 @@ public final class FactoryMachineAccess {
     }
 
     private BlockHitResult interactionHit() {
+        var face = targetFace();
         var hit = Vec3.atCenterOf(position).add(
-                accessDirection.getStepX() * 0.5D,
-                accessDirection.getStepY() * 0.5D,
-                accessDirection.getStepZ() * 0.5D);
-        return new BlockHitResult(hit, accessDirection, position, false);
+                face.getStepX() * 0.5D,
+                face.getStepY() * 0.5D,
+                face.getStepZ() * 0.5D);
+        return new BlockHitResult(hit, face, position, false);
     }
 
     private List<ItemStack> dropsFor(BlockState state, FakePlayer player, ItemStack tool) {
@@ -505,89 +362,6 @@ public final class FactoryMachineAccess {
 
         private static BreakResult failed() {
             return new BreakResult(false, List.of());
-        }
-    }
-
-    private static int simulatedCapacity(IItemHandler handler, int slot, ItemStack template) {
-        var probe = template.copyWithCount(template.getMaxStackSize());
-        var remainder = handler.insertItem(slot, probe, true);
-        return probe.getCount() - remainder.getCount();
-    }
-
-    private static VirtualSlot[] virtualSlots(IItemHandler handler) {
-        var result = new VirtualSlot[handler.getSlots()];
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            result[slot] = new VirtualSlot(handler.getStackInSlot(slot));
-        }
-        return result;
-    }
-
-    private static long insertIntoVirtual(
-            IItemHandler handler,
-            VirtualSlot[] slots,
-            ItemStack input,
-            long amount) {
-        var remaining = amount;
-        for (int slot = 0; slot < slots.length && remaining > 0; slot++) {
-            var virtual = slots[slot];
-            if (!virtual.accepts(input)) {
-                continue;
-            }
-
-            if (!virtual.initialized()) {
-                var accepted = simulatedCapacity(handler, slot, input);
-                if (accepted <= 0) {
-                    continue;
-                }
-                virtual.initialize(input, accepted);
-            }
-
-            var inserted = (int) Math.min(remaining, virtual.remainingCapacity());
-            virtual.insert(input, inserted);
-            remaining -= inserted;
-        }
-        return remaining;
-    }
-
-    private static final class VirtualSlot {
-        private ItemStack stack;
-        private int capacity;
-
-        private VirtualSlot(ItemStack initial) {
-            stack = initial.copy();
-            capacity = -1;
-        }
-
-        private boolean accepts(ItemStack input) {
-            return stack.isEmpty() || ItemStack.isSameItemSameComponents(stack, input);
-        }
-
-        private boolean initialized() {
-            return capacity >= 0;
-        }
-
-        private void initialize(ItemStack input, int accepted) {
-            if (stack.isEmpty()) {
-                stack = input.copyWithCount(0);
-                capacity = accepted;
-            } else {
-                capacity = stack.getCount() + accepted;
-            }
-        }
-
-        private int remainingCapacity() {
-            return Math.max(0, capacity - stack.getCount());
-        }
-
-        private void insert(ItemStack input, int amount) {
-            if (amount <= 0) {
-                return;
-            }
-            if (stack.isEmpty()) {
-                stack = input.copyWithCount(amount);
-            } else {
-                stack.grow(amount);
-            }
         }
     }
 }

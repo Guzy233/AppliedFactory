@@ -44,7 +44,6 @@ import appeng.api.networking.crafting.ICraftingProvider;
 import appeng.api.networking.energy.IEnergyService;
 import appeng.api.networking.security.IActionHost;
 import appeng.api.networking.security.IActionSource;
-import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
 import appeng.api.stacks.KeyCounter;
 import appeng.api.util.AECableType;
@@ -398,10 +397,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
         var inputs = collectInputs(patternDetails, inputHolder);
         var outputs = collectOutputs(patternDetails);
-        if (inputs.isEmpty() || outputs.isEmpty()
-                || inputs.stream().anyMatch(resource -> !(resource.key() instanceof AEItemKey))
-                || outputs.stream().anyMatch(resource -> !(resource.key() instanceof AEItemKey))
-                || !cache.storeAll(inputs)) {
+        if (inputs.isEmpty() || outputs.isEmpty() || !cache.storeAll(inputs)) {
             return false;
         }
 
@@ -495,10 +491,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     /**
-     * Called by the crafting CPU mixin when one of our crafting requests ends:
-     * both explicit cancellation and successful completion (the request's outputs
-     * are already satisfied, possibly by another source). In either case every
-     * still-running job for that request is redundant and gets cancelled.
+     * Called by the crafting CPU mixin when one of our crafting requests ends without
+     * success (explicit cancellation, a cancelled link, or a failed craft). Jobs that
+     * were stamped with that request id are redundant and get cancelled. A successful
+     * completion never calls this: the delivering workflow finishes on its own.
      */
     public void onCraftingRequestFinished(UUID craftingRequestId) {
         if (program != null) {

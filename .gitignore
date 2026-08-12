@@ -38,3 +38,6 @@ run/
 **/src/generated/**/.cache/
 repo/
 !**/src/**/repo/
+
+### Extracted AE2 sources for reference (not part of the mod) ###
+/appeng/

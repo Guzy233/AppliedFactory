@@ -21,6 +21,7 @@ import org.mozilla.javascript.Undefined;
 import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.factory.FactoryActionExecutor;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
+import com.fulent.appliedfactory.factory.FactoryBusTarget;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.part.FactoryBusPart;
 
@@ -28,12 +29,18 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
 import appeng.api.config.Actionable;
 import appeng.api.crafting.PatternDetailsHelper;
+import appeng.api.networking.security.IActionSource;
+import appeng.api.stacks.AEFluidKey;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEKeyType;
+import appeng.api.stacks.AEKeyTypes;
 import appeng.api.stacks.GenericStack;
 import appeng.api.stacks.KeyCounter;
+import appeng.api.storage.MEStorage;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.core.component.DataComponentPatch;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
@@ -45,6 +52,8 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.neoforged.neoforge.fluids.FluidStack;
+import net.neoforged.neoforge.server.ServerLifecycleHooks;
 
 /**
  * Installs and drives the bus-centric script API for one loaded program: the
@@ -62,15 +71,18 @@ import net.minecraft.world.level.block.state.properties.Property;
 final class RuntimeBridge {
     static final String CONTEXT_NAME = "__factoryContext";
     static final String BUS_PROTOTYPE_NAME = "__factoryBusPrototype";
-    static final String BUS_ITEMS_PROTOTYPE_NAME = "__factoryBusItemsPrototype";
+    static final String BUS_STORAGE_PROTOTYPE_NAME = "__factoryBusStoragePrototype";
     static final String NETWORK_PROTOTYPE_NAME = "__factoryNetworkPrototype";
-    static final String NETWORK_ITEMS_PROTOTYPE_NAME = "__factoryNetworkItemsPrototype";
+    static final String NETWORK_STORAGE_PROTOTYPE_NAME = "__factoryNetworkStoragePrototype";
     static final String BLOCK_PROTOTYPE_NAME = "__factoryBlockPrototype";
     static final String RESOURCE_PROTOTYPE_NAME = "__factoryResourcePrototype";
     static final String BUS_ADDRESS_PROPERTY = "__factoryBusAddress";
     static final String NETWORK_SIDE_PROPERTY = "__factoryNetworkSide";
+    static final String STORAGE_CHANNEL_PROPERTY = "__factoryStorageChannel";
     static final String RESOURCE_KEY_PROPERTY = "__factoryKey";
     static final String RESOURCE_ITEM_PROPERTY = "__factoryItem";
+    static final String RESOURCE_CHANNEL_PROPERTY = "__factoryChannel";
+    static final String RESOURCE_TAG_PROPERTY = "__factoryKeyTag";
     static final String RESOURCE_OWNER_PROPERTY = "__factoryOwner";
     static final String RESOURCE_NBT_PROPERTY = "__factoryNbt";
     static final String INITIALIZE_NAME = "initialize";
@@ -78,14 +90,16 @@ final class RuntimeBridge {
     static final String REGISTER_CONTROLLER_NAME = "registerControllerHandler";
     static final String REGISTER_PASSIVE_NAME = "registerPassive";
     static final String ITEM_NAME = "item";
+    static final String STACK_NAME = "stack";
+    static final String STACK_TAG_NAME = "stackTag";
 
     private final Context installContext;
     private final Scriptable scope;
     private final Set<String> installedScopeNames = new LinkedHashSet<>();
     private Scriptable busPrototype;
-    private Scriptable busItemsPrototype;
+    private Scriptable busStoragePrototype;
     private Scriptable networkPrototype;
-    private Scriptable networkItemsPrototype;
+    private Scriptable networkStoragePrototype;
     private Scriptable blockPrototype;
     private Scriptable resourcePrototype;
     private Scriptable contextObject;
@@ -98,20 +112,20 @@ final class RuntimeBridge {
 
     void install(Registration registration) {
         busPrototype = Jsify.toScriptable(installContext, scope, null, new BusPrototypeTemplate());
-        busItemsPrototype = Jsify.toScriptable(installContext, scope, null,
-                new BusItemsPrototypeTemplate());
+        busStoragePrototype = Jsify.toScriptable(installContext, scope, null,
+                new BusStoragePrototypeTemplate());
         networkPrototype = Jsify.toScriptable(installContext, scope, null,
                 new NetworkPrototypeTemplate());
-        networkItemsPrototype = Jsify.toScriptable(installContext, scope, null,
-                new NetworkItemsPrototypeTemplate());
+        networkStoragePrototype = Jsify.toScriptable(installContext, scope, null,
+                new NetworkStoragePrototypeTemplate());
         blockPrototype = Jsify.toScriptable(installContext, scope, null,
                 new BlockPrototypeTemplate());
         resourcePrototype = Jsify.toScriptable(installContext, scope, null,
                 new ResourcePrototypeTemplate());
         installScope(BUS_PROTOTYPE_NAME, busPrototype);
-        installScope(BUS_ITEMS_PROTOTYPE_NAME, busItemsPrototype);
+        installScope(BUS_STORAGE_PROTOTYPE_NAME, busStoragePrototype);
         installScope(NETWORK_PROTOTYPE_NAME, networkPrototype);
-        installScope(NETWORK_ITEMS_PROTOTYPE_NAME, networkItemsPrototype);
+        installScope(NETWORK_STORAGE_PROTOTYPE_NAME, networkStoragePrototype);
         installScope(BLOCK_PROTOTYPE_NAME, blockPrototype);
         installScope(RESOURCE_PROTOTYPE_NAME, resourcePrototype);
         installScope(INITIALIZE_NAME, initializeFunction(registration));
@@ -119,6 +133,8 @@ final class RuntimeBridge {
         installScope(REGISTER_CONTROLLER_NAME, controllerFunction(registration));
         installScope(REGISTER_PASSIVE_NAME, passiveFunction(registration));
         installScope(ITEM_NAME, itemFunction());
+        installScope(STACK_NAME, stackFunction());
+        installScope(STACK_TAG_NAME, stackTagFunction());
         installScope(CONTEXT_NAME, Undefined.instance);
     }
 
@@ -267,18 +283,66 @@ final class RuntimeBridge {
     private BaseFunction itemFunction() {
         return function((cx, args) -> {
             requireArity(args, 2, 3, "item(id, amount[, nbt])");
-            var id = ResourceLocation.tryParse(Context.toString(args[0]));
-            if (id == null || !BuiltInRegistries.ITEM.containsKey(id)) {
-                throw scriptError("Unknown item id: " + Context.toString(args[0]));
-            }
-            var amount = positiveLong(args[1], "item amount");
-            CompoundTag nbt = null;
-            if (args.length == 3) {
-                nbt = NbtJs.fromObject(
-                        cx, requireObject(args[2], "item nbt"), "item nbt");
-            }
-            return itemResourceObject(cx, id, amount, nbt);
+            return stackSpec(cx, AEKeyType.items(), args);
         });
+    }
+
+    private BaseFunction stackFunction() {
+        return function((cx, args) -> {
+            requireArity(args, 3, 4, "stack(channel, id, amount[, nbt])");
+            var channel = resolveChannel(Context.toString(args[0]));
+            var spec = new Object[args.length - 1];
+            System.arraycopy(args, 1, spec, 0, spec.length);
+            return stackSpec(cx, channel, spec);
+        });
+    }
+
+    /**
+     * Builds a resource spec from a serialized generic AE key tag (as returned by
+     * {@code resource.keyTag()}) plus an amount. The key is reconstructed through
+     * AE2's generic {@code fromTagGeneric}, so any registered channel works with
+     * zero per-channel adapter code — including channels whose key codec cannot be
+     * expressed as a plain id (e.g. Applied Flux's energy key).
+     */
+    private BaseFunction stackTagFunction() {
+        return function((cx, args) -> {
+            requireArity(args, 2, 2, "stackTag(tag, amount)");
+            var tag = Context.toString(args[0]);
+            try {
+                TagParser.parseTag(tag);
+            } catch (CommandSyntaxException exception) {
+                throw scriptError("stackTag requires a valid serialized key tag");
+            }
+            var amount = positiveLong(args[1], "resource amount");
+            return Jsify.toScriptable(cx, scope, resourcePrototype,
+                    new StackTagResourceView(tag, (double) amount));
+        });
+    }
+
+    /**
+     * Builds a durable resource spec object from {@code [id, amount, nbt?]}. The
+     * exact AE key is re-derived at parse time by the channel's spec parser or the
+     * generic {@code {id}} fallback, so the object itself only carries strings and
+     * survives continuation serialization regardless of channel.
+     */
+    private Scriptable stackSpec(Context cx, AEKeyType channel, Object[] args) {
+        var id = Context.toString(args[0]);
+        var amount = positiveLong(args[1], "resource amount");
+        try {
+            KeySpecRegistry.validate(channel, id);
+        } catch (IllegalArgumentException exception) {
+            throw scriptError(exception.getMessage());
+        }
+        CompoundTag nbt = null;
+        if (args.length == 3) {
+            nbt = NbtJs.fromObject(cx, requireObject(args[2], "resource nbt"), "resource nbt");
+        }
+        return Jsify.toScriptable(cx, scope, resourcePrototype,
+                new StackResourceView(
+                        channel.getId().toString(),
+                        id,
+                        (double) amount,
+                        nbt == null ? null : nbt.toString()));
     }
 
     private Scriptable createContextObject(Context cx) {
@@ -415,28 +479,43 @@ final class RuntimeBridge {
             requireArity(args, 0, 0, "bus.target()");
             var bus = resolveBus(requireBus(self)).orElse(null);
             return bus == null ? null
-                    : bus.machine().map(machine -> blockObject(cx, machine))
+                    : bus.target().map(target -> blockObject(cx, target))
                             .orElse(null);
+        }
+
+        @JsMethod
+        public Object storage(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "bus.storage(channel)");
+            return busStorageHandle(cx, requireBus(self), resolveChannel(Context.toString(args[0])));
         }
 
         @JsMethod
         public Object items(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "bus.items()");
-            var handle = requireBus(self);
-            var bus = resolveBus(handle).orElse(null);
-            if (bus == null || bus.machine()
-                    .filter(machine -> machine.hasItemStorage()).isEmpty()) {
-                return null;
-            }
-            return busItemsObject(cx, handle);
+            return busStorageHandle(cx, requireBus(self), AEKeyType.items());
         }
 
         @JsMethod
         public Object detect(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 1, 1, "bus.detect(selector)");
             var bus = resolveBus(requireBus(self)).orElse(null);
-            var machine = bus == null ? null : bus.machine().orElse(null);
-            return machine != null && machine.matchesBlock(Context.toString(args[0]));
+            var target = bus == null ? null : bus.target().orElse(null);
+            return target != null && target.matchesBlock(Context.toString(args[0]));
+        }
+
+        @JsMethod
+        public Object channels(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 0, 0, "bus.channels()");
+            var bus = resolveBus(requireBus(self)).orElse(null);
+            var target = bus == null ? null : bus.target().orElse(null);
+            if (target == null) {
+                return cx.newArray(scope, 0);
+            }
+            var ids = target.channels().stream()
+                    .map(type -> type.getId().toString())
+                    .sorted()
+                    .toArray();
+            return cx.newArray(scope, ids);
         }
 
         @JsMethod
@@ -481,51 +560,59 @@ final class RuntimeBridge {
         }
     }
 
-    /** Shared methods for a bus's item storage handle. */
-    private final class BusItemsPrototypeTemplate {
+    /** Shared methods for a bus handle bound to one AE key channel. */
+    private final class BusStoragePrototypeTemplate {
         @JsMethod
         public Object read(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 0, 0, "bus.items().read()");
-            var bus = resolveBus(requireBus(self)).orElse(null);
-            if (bus == null) {
+            requireArity(args, 0, 0, "bus.storage(channel).read()");
+            var channel = requireStorageChannel(self);
+            var storage = busStorage(self, channel);
+            if (storage == null) {
                 return cx.newArray(scope, 0);
             }
-            var resources = bus.machine().map(machine -> resources(machine.items()))
-                    .orElse(List.of());
-            return resourceArray(cx, resources, null);
+            return resourceArray(cx, availableResources(storage), null);
         }
 
         @JsMethod
         public Object push(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "bus.items().push(resources)");
-            return suspend(cx, FactoryScriptAction.busPush(
-                    requireBus(self), parseOwned(args[0])));
+            requireArity(args, 1, 1, "bus.storage(channel).push(resources)");
+            var channel = requireStorageChannel(self);
+            var resources = parseOwned(args[0]);
+            requireSameChannel(resources, channel, "bus push");
+            return suspend(cx,
+                    FactoryScriptAction.busPush(requireBus(self), channel, resources));
         }
 
         @JsMethod
         public Object pushTillFull(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "bus.items().pushTillFull(resources)");
-            return suspend(cx, FactoryScriptAction.busPushTillFull(
-                    requireBus(self), parseOwned(args[0])));
+            requireArity(args, 1, 1, "bus.storage(channel).pushTillFull(resources)");
+            var channel = requireStorageChannel(self);
+            var resources = parseOwned(args[0]);
+            requireSameChannel(resources, channel, "bus push");
+            return suspend(cx,
+                    FactoryScriptAction.busPushTillFull(requireBus(self), channel, resources));
         }
 
         @JsMethod
         public Object canPush(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "bus.items().canPush(resources)");
+            requireArity(args, 1, 1, "bus.storage(channel).canPush(resources)");
+            var channel = requireStorageChannel(self);
             var resources = parseResourceSpecs(args[0], "bus push resources");
-            var bus = resolveBus(requireBus(self)).orElse(null);
-            var machine = bus == null ? null : bus.machine().orElse(null);
-            if (machine == null) {
+            requireSameChannel(resources, channel, "bus push");
+            var storage = busStorage(self, channel);
+            if (storage == null) {
                 return false;
             }
-            var stacks = toItemStacks(resources);
-            return stacks != null && machine.canInsertAll(stacks);
+            return resources.stream().allMatch(resource -> storage.insert(
+                    resource.key(), resource.amount(), Actionable.SIMULATE, IActionSource.empty())
+                    == resource.amount());
         }
 
         @JsMethod
         public Object extract(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 0, 0, "bus.items().extract()");
-            return suspend(cx, FactoryScriptAction.busExtract(requireBus(self)));
+            requireArity(args, 0, 0, "bus.storage(channel).extract()");
+            var channel = requireStorageChannel(self);
+            return suspend(cx, FactoryScriptAction.busExtract(requireBus(self), channel));
         }
     }
 
@@ -538,31 +625,48 @@ final class RuntimeBridge {
         }
 
         @JsMethod
+        public Object storage(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 1, 1, "network.storage(channel)");
+            return networkStorageObject(cx, requireNetwork(self),
+                    resolveChannel(Context.toString(args[0])));
+        }
+
+        @JsMethod
         public Object items(Context cx, Scriptable self, Object[] args) {
             requireArity(args, 0, 0, "network.items()");
-            return networkItemsObject(cx, requireNetwork(self));
+            return networkStorageObject(cx, requireNetwork(self), AEKeyType.items());
+        }
+
+        @JsMethod
+        public Object channels(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 0, 0, "network.channels()");
+            return channelArray(cx);
         }
     }
 
-    /** Shared methods for a network's item storage handle. */
-    private final class NetworkItemsPrototypeTemplate {
+    /**
+     * Shared methods for a network storage handle. Push, extract and canPush act
+     * on the whole grid storage (already channel-generic); read and count are
+     * filtered to the handle's key channel.
+     */
+    private final class NetworkStoragePrototypeTemplate {
         @JsMethod
         public Object push(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "network.items().push(resources)");
+            requireArity(args, 1, 1, "network.storage(channel).push(resources)");
             return suspend(cx, FactoryScriptAction.networkPush(
                     requireNetwork(self), parseOwned(args[0])));
         }
 
         @JsMethod
         public Object pushTillFull(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "network.items().pushTillFull(resources)");
+            requireArity(args, 1, 1, "network.storage(channel).pushTillFull(resources)");
             return suspend(cx, FactoryScriptAction.networkPushTillFull(
                     requireNetwork(self), parseOwned(args[0])));
         }
 
         @JsMethod
         public Object canPush(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "network.items().canPush(resources)");
+            requireArity(args, 1, 1, "network.storage(channel).canPush(resources)");
             var resources = parseResourceSpecs(args[0], "network push resources");
             var endpoint = context.networkStorage(requireNetwork(self)).orElse(null);
             if (endpoint == null) {
@@ -575,7 +679,7 @@ final class RuntimeBridge {
 
         @JsMethod
         public Object extract(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "network.items().extract(requests)");
+            requireArity(args, 1, 1, "network.storage(channel).extract(requests)");
             return suspend(cx, FactoryScriptAction.networkExtract(
                     requireNetwork(self),
                     parseResourceSpecs(args[0], "network requests")));
@@ -583,24 +687,26 @@ final class RuntimeBridge {
 
         @JsMethod
         public Object read(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 0, 0, "network.items().read()");
+            requireArity(args, 0, 0, "network.storage(channel).read()");
+            var channel = requireStorageChannel(self);
             var endpoint = context.networkStorage(requireNetwork(self)).orElse(null);
             if (endpoint == null) {
                 return cx.newArray(scope, 0);
             }
-            return resourceArray(cx, availableResources(endpoint), null);
+            return resourceArray(cx, channelResources(endpoint, channel), null);
         }
 
         @JsMethod
         public Object count(Context cx, Scriptable self, Object[] args) {
-            requireArity(args, 1, 1, "network.items().count(spec)");
+            requireArity(args, 1, 1, "network.storage(channel).count(spec)");
+            var channel = requireStorageChannel(self);
             var endpoint = context.networkStorage(requireNetwork(self)).orElse(null);
             if (endpoint == null) {
                 return 0.0;
             }
             var selector = args[0];
             long total = 0;
-            for (var resource : availableResources(endpoint)) {
+            for (var resource : channelResources(endpoint, channel)) {
                 if (matchesResource(resource, selector)) {
                     total = Math.addExact(total, resource.amount());
                 }
@@ -621,8 +727,16 @@ final class RuntimeBridge {
             var selector = Context.toString(args[0]);
             if (selector.startsWith("#")) {
                 var tagId = ResourceLocation.tryParse(selector.substring(1));
-                return tagId != null && key instanceof AEItemKey itemKey
-                        && itemKey.isTagged(TagKey.create(Registries.ITEM, tagId));
+                if (tagId == null) {
+                    return false;
+                }
+                if (key instanceof AEItemKey itemKey) {
+                    return itemKey.isTagged(TagKey.create(Registries.ITEM, tagId));
+                }
+                if (key instanceof AEFluidKey fluidKey) {
+                    return fluidKey.isTagged(TagKey.create(Registries.FLUID, tagId));
+                }
+                return false;
             }
             var id = ResourceLocation.tryParse(selector);
             return id != null && id.equals(key.getId());
@@ -635,10 +749,23 @@ final class RuntimeBridge {
                 throw scriptError("Resource method received an invalid receiver");
             }
             var key = resourceKey(self);
-            if (!(key instanceof AEItemKey itemKey)) {
-                return cx.newObject(scope);
+            if (key instanceof AEItemKey itemKey) {
+                return itemNbtObject(cx, itemKey);
             }
-            return itemNbtObject(cx, itemKey);
+            if (key instanceof AEFluidKey fluidKey) {
+                return fluidNbtObject(cx, fluidKey);
+            }
+            return cx.newObject(scope);
+        }
+
+        @JsMethod
+        public Object keyTag(Context cx, Scriptable self, Object[] args) {
+            requireArity(args, 0, 0, "resource.keyTag()");
+            if (self.getPrototype() != resourcePrototype) {
+                throw scriptError("Resource method received an invalid receiver");
+            }
+            // Serialized generic AE key tag; reconstructable via stackTag(tag, amount).
+            return resourceKey(self).toTagGeneric(registries()).toString();
         }
 
         @JsMethod
@@ -697,12 +824,13 @@ final class RuntimeBridge {
                 encodeAddress(address),
                 busAddressObject(cx, address),
                 blockAddressObject(cx, address.dimension(), targetPosition),
-                address.side().getName()));
+                address.side().getOpposite().getName()));
     }
 
-    private Scriptable busItemsObject(Context cx, FactoryBusAddress address) {
-        return Jsify.toScriptable(cx, scope, busItemsPrototype,
-                new BusItemsView(encodeAddress(address)));
+    private Scriptable busStorageObject(
+            Context cx, FactoryBusAddress address, AEKeyType channel) {
+        return Jsify.toScriptable(cx, scope, busStoragePrototype,
+                new BusStorageView(encodeAddress(address), channel.getId().toString()));
     }
 
     private Scriptable networkObject(Context cx, Direction side) {
@@ -710,9 +838,25 @@ final class RuntimeBridge {
                 new NetworkView(side.getName(), busArray(cx, context.buses(side))));
     }
 
-    private Scriptable networkItemsObject(Context cx, Direction side) {
-        return Jsify.toScriptable(cx, scope, networkItemsPrototype,
-                new NetworkItemsView(side.getName()));
+    private Scriptable networkStorageObject(Context cx, Direction side, AEKeyType channel) {
+        return Jsify.toScriptable(cx, scope, networkStoragePrototype,
+                new NetworkStorageView(side.getName(), channel.getId().toString()));
+    }
+
+    /**
+     * Returns a durable bus storage handle for one channel, or null when the
+     * target currently exposes no storage for that channel. The handle itself is
+     * re-resolved on every access; only the address and channel are stored.
+     */
+    @Nullable
+    private Scriptable busStorageHandle(
+            Context cx, FactoryBusAddress address, AEKeyType channel) {
+        var bus = resolveBus(address).orElse(null);
+        var target = bus == null ? null : bus.target().orElse(null);
+        if (target == null || target.storage(channel) == null) {
+            return null;
+        }
+        return busStorageObject(cx, address, channel);
     }
 
     private Scriptable busArray(Context cx, List<FactoryBusPart> buses) {
@@ -749,40 +893,31 @@ final class RuntimeBridge {
         return Jsify.toScriptable(cx, scope, null, new BusStateView(
                 bus.isActive(),
                 bus.isPowered(),
-                bus.machine().map(machine -> machine.redstoneLevel()).orElse(0),
+                bus.target().map(target -> target.redstoneLevel()).orElse(0),
                 upgrades,
                 cx.newObject(scope)));
     }
 
-    private Scriptable blockObject(Context cx,
-            com.fulent.appliedfactory.factory.FactoryMachineAccess machine) {
+    private Scriptable blockObject(Context cx, FactoryBusTarget target) {
         var state = cx.newObject(scope);
-        var blockState = machine.blockState();
+        var blockState = target.blockState();
         for (var property : blockState.getProperties()) {
             defineReadOnly(state, property.getName(), propertyName(blockState, property));
         }
-        var blockEntityType = machine.blockEntityTypeId();
-        var blockNbt = machine.blockEntityNbt();
+        var blockEntityType = target.blockEntityTypeId();
+        var blockNbt = target.blockEntityNbt();
         var nbtObject = blockNbt == null ? null : NbtJs.toJs(cx, scope, blockNbt);
         return Jsify.toScriptable(cx, scope, blockPrototype, new BlockView(
-                machine.blockId().toString(),
+                target.blockId().toString(),
                 state,
                 blockEntityType == null ? null : blockEntityType.toString(),
                 nbtObject instanceof Scriptable scriptable ? scriptable : null));
     }
 
-    private Scriptable itemResourceObject(
-            Context cx, ResourceLocation id, long amount, @Nullable CompoundTag nbt) {
-        return Jsify.toScriptable(cx, scope, resourcePrototype,
-                new ItemResourceView(id.toString(), (double) amount,
-                        nbt == null ? null : nbt.toString()));
-    }
-
-    /** Snapshot of everything an attached AE network can currently supply. */
-    private List<FactoryResource> availableResources(
-            FactoryActionExecutor.NetworkEndpoint endpoint) {
+    /** Snapshot of everything one external storage facade currently exposes. */
+    private List<FactoryResource> availableResources(MEStorage storage) {
         var amounts = new KeyCounter();
-        endpoint.storage().getAvailableStacks(amounts);
+        storage.getAvailableStacks(amounts);
         var result = new ArrayList<FactoryResource>();
         for (var entry : amounts) {
             if (entry.getLongValue() > 0) {
@@ -792,9 +927,33 @@ final class RuntimeBridge {
         return result;
     }
 
+    /** Snapshot of everything an attached AE network can currently supply. */
+    private List<FactoryResource> availableResources(
+            FactoryActionExecutor.NetworkEndpoint endpoint) {
+        return availableResources(endpoint.storage());
+    }
+
+    /** The network's currently available resources restricted to one key channel. */
+    private List<FactoryResource> channelResources(
+            FactoryActionExecutor.NetworkEndpoint endpoint, AEKeyType channel) {
+        return availableResources(endpoint).stream()
+                .filter(resource -> resource.key().getType() == channel)
+                .toList();
+    }
+
+    /** Sorted ids of every AE key channel registered in AE2 (including addon channels). */
+    private Scriptable channelArray(Context cx) {
+        var ids = AEKeyTypes.getAll().stream()
+                .map(type -> type.getId().toString())
+                .sorted()
+                .toArray();
+        return cx.newArray(scope, ids);
+    }
+
     /**
-     * A string selector matches an item id or {@code #tag} loosely (any data
-     * components); a resource object matches its exact AE key.
+     * A string selector matches a resource id or {@code #tag} loosely (any data
+     * components, tags resolved against the key's own channel registry); a
+     * resource object matches its exact AE key.
      */
     private boolean matchesResource(FactoryResource resource, Object selector) {
         if (selector instanceof Scriptable scriptable) {
@@ -807,8 +966,16 @@ final class RuntimeBridge {
         var text = Context.toString(selector);
         if (text.startsWith("#")) {
             var tagId = ResourceLocation.tryParse(text.substring(1));
-            return tagId != null && resource.key() instanceof AEItemKey itemKey
-                    && itemKey.isTagged(TagKey.create(Registries.ITEM, tagId));
+            if (tagId == null) {
+                return false;
+            }
+            if (resource.key() instanceof AEItemKey itemKey) {
+                return itemKey.isTagged(TagKey.create(Registries.ITEM, tagId));
+            }
+            if (resource.key() instanceof AEFluidKey fluidKey) {
+                return fluidKey.isTagged(TagKey.create(Registries.FLUID, tagId));
+            }
+            return false;
         }
         var id = ResourceLocation.tryParse(text);
         return id != null && id.equals(resource.key().getId());
@@ -816,7 +983,7 @@ final class RuntimeBridge {
 
     /** The full saved item NBT of one exact item key, as a read-only JS tree. */
     private Scriptable itemNbtObject(Context cx, AEItemKey itemKey) {
-        var tag = itemKey.toStack().save(context.registries());
+        var tag = itemKey.toStack().save(registries());
         return (Scriptable) NbtJs.toJs(cx, scope, tag);
     }
 
@@ -830,7 +997,7 @@ final class RuntimeBridge {
         return Jsify.toScriptable(cx, scope, resourcePrototype, new ResourceView(
                 resource.id().toString(),
                 resource.amount(),
-                resource.key().toTagGeneric(context.registries()).toString(),
+                resource.key().toTagGeneric(registries()).toString(),
                 owner == null ? "" : owner.toString()));
     }
 
@@ -850,9 +1017,10 @@ final class RuntimeBridge {
             @JsReadOnly String targetFace) {
     }
 
-    /** Java template for a bus item storage handle. */
-    private record BusItemsView(
-            @JsInternal(name = BUS_ADDRESS_PROPERTY) String busAddress) {
+    /** Java template for a bus storage handle bound to one key channel. */
+    private record BusStorageView(
+            @JsInternal(name = BUS_ADDRESS_PROPERTY) String busAddress,
+            @JsInternal(name = STORAGE_CHANNEL_PROPERTY) String channel) {
     }
 
     /** Java template for a network handle. */
@@ -881,17 +1049,24 @@ final class RuntimeBridge {
         }
     }
 
-    /** Java template for a network item storage handle. */
-    private static final class NetworkItemsView {
+    /** Java template for a network storage handle bound to one key channel. */
+    private static final class NetworkStorageView {
         private final String side;
+        private final String channel;
 
-        private NetworkItemsView(String side) {
+        private NetworkStorageView(String side, String channel) {
             this.side = side;
+            this.channel = channel;
         }
 
         @JsInternal(name = NETWORK_SIDE_PROPERTY)
         public String getNetworkSide() {
             return side;
+        }
+
+        @JsInternal(name = STORAGE_CHANNEL_PROPERTY)
+        public String getChannel() {
+            return channel;
         }
     }
 
@@ -931,13 +1106,46 @@ final class RuntimeBridge {
             @JsReadOnly Scriptable nbt) {
     }
 
-    /** Java template for the {@code item()} global result. */
-    private static final class ItemResourceView {
+    /** Java template for the {@code stackTag(tag, amount)} global result. */
+    private static final class StackTagResourceView {
+        private final String tag;
+        private final double amount;
+
+        private StackTagResourceView(String tag, double amount) {
+            this.tag = tag;
+            this.amount = amount;
+        }
+
+        @JsReadOnly
+        public String getId() {
+            return tag;
+        }
+
+        @JsReadOnly
+        public double getAmount() {
+            return amount;
+        }
+
+        @JsInternal(name = RESOURCE_TAG_PROPERTY)
+        public String getKeyTag() {
+            return tag;
+        }
+
+        @JsInternal(name = RESOURCE_OWNER_PROPERTY)
+        public String getOwner() {
+            return "";
+        }
+    }
+
+    /** Java template for the {@code item()} / {@code stack()} global result. */
+    private static final class StackResourceView {
+        private final String channel;
         private final String id;
         private final double amount;
         private final String nbt;
 
-        private ItemResourceView(String id, double amount, String nbt) {
+        private StackResourceView(String channel, String id, double amount, String nbt) {
+            this.channel = channel;
             this.id = id;
             this.amount = amount;
             this.nbt = nbt;
@@ -951,6 +1159,11 @@ final class RuntimeBridge {
         @JsReadOnly
         public double getAmount() {
             return amount;
+        }
+
+        @JsInternal(name = RESOURCE_CHANNEL_PROPERTY)
+        public String getChannelId() {
+            return channel;
         }
 
         @JsInternal(name = RESOURCE_ITEM_PROPERTY)
@@ -1051,10 +1264,15 @@ final class RuntimeBridge {
         // fully
         // validates their content before anything reaches the game state.
         var exactKey = ScriptableObject.getProperty(object, RESOURCE_KEY_PROPERTY);
+        var channel = ScriptableObject.getProperty(object, RESOURCE_CHANNEL_PROPERTY);
         var itemId = ScriptableObject.getProperty(object, RESOURCE_ITEM_PROPERTY);
+        var keyTag = ScriptableObject.getProperty(object, RESOURCE_TAG_PROPERTY);
         var owner = ScriptableObject.getProperty(object, RESOURCE_OWNER_PROPERTY);
         if (owner == Scriptable.NOT_FOUND
-                || (exactKey == Scriptable.NOT_FOUND && itemId == Scriptable.NOT_FOUND)) {
+                || (exactKey == Scriptable.NOT_FOUND
+                        && channel == Scriptable.NOT_FOUND
+                        && itemId == Scriptable.NOT_FOUND
+                        && keyTag == Scriptable.NOT_FOUND)) {
             throw scriptError(name + " must contain resources created by this API");
         }
         return object;
@@ -1078,7 +1296,7 @@ final class RuntimeBridge {
         if (keyTag != Scriptable.NOT_FOUND) {
             try {
                 var key = AEKey.fromTagGeneric(
-                        context.registries(), TagParser.parseTag(Context.toString(keyTag)));
+                        registries(), TagParser.parseTag(Context.toString(keyTag)));
                 if (key != null) {
                     return key;
                 }
@@ -1087,9 +1305,48 @@ final class RuntimeBridge {
             }
             throw scriptError("Resource contains an invalid exact AE key");
         }
+        var rawTag = ScriptableObject.getProperty(resource, RESOURCE_TAG_PROPERTY);
+        if (rawTag != Scriptable.NOT_FOUND) {
+            try {
+                var key = AEKey.fromTagGeneric(
+                        registries(), TagParser.parseTag(Context.toString(rawTag)));
+                if (key != null) {
+                    return key;
+                }
+            } catch (CommandSyntaxException ignored) {
+                // Fall through to the safe script error below.
+            }
+            throw scriptError("Resource contains an invalid serialized key tag");
+        }
+        var channelValue = ScriptableObject.getProperty(resource, RESOURCE_CHANNEL_PROPERTY);
+        if (channelValue != Scriptable.NOT_FOUND) {
+            var channel = resolveChannel(Context.toString(channelValue));
+            var idValue = ScriptableObject.getProperty(resource, RESOURCE_ITEM_PROPERTY);
+            var id = idValue == Scriptable.NOT_FOUND
+                    ? null
+                    : Context.toString(idValue);
+            if (id == null) {
+                throw scriptError("Resource contains an invalid resource id");
+            }
+            var nbtValue = ScriptableObject.getProperty(resource, RESOURCE_NBT_PROPERTY);
+            CompoundTag nbt = null;
+            if (nbtValue != Scriptable.NOT_FOUND) {
+                try {
+                    nbt = TagParser.parseTag(Context.toString(nbtValue));
+                } catch (CommandSyntaxException exception) {
+                    throw scriptError("Resource contains invalid data components");
+                }
+            }
+            try {
+                return KeySpecRegistry.parse(registries(), channel, id, nbt);
+            } catch (IllegalArgumentException exception) {
+                throw scriptError("Resource contains an invalid " + channel.getId() + " spec");
+            }
+        }
+        // Legacy persisted continuation from before channel-aware specs: assume items.
         var nbtValue = ScriptableObject.getProperty(resource, RESOURCE_NBT_PROPERTY);
         if (nbtValue != Scriptable.NOT_FOUND) {
-            return nbtResourceKey(resource, Context.toString(nbtValue));
+            return legacyItemKey(resource, Context.toString(nbtValue));
         }
         var itemIdValue = ScriptableObject.getProperty(resource, RESOURCE_ITEM_PROPERTY);
         var itemId = itemIdValue == Scriptable.NOT_FOUND
@@ -1101,8 +1358,8 @@ final class RuntimeBridge {
         return AEItemKey.of(BuiltInRegistries.ITEM.get(itemId));
     }
 
-    /** Rebuilds an exact item key from the component patch carried by an {@code item()} spec. */
-    private AEKey nbtResourceKey(Scriptable resource, String nbtTag) {
+    /** Rebuilds an exact item key from the component patch of a legacy item spec. */
+    private AEKey legacyItemKey(Scriptable resource, String nbtTag) {
         final DataComponentPatch patch;
         try {
             patch = DataComponentPatch.CODEC.parse(
@@ -1147,6 +1404,76 @@ final class RuntimeBridge {
         return context.resolveBus(address);
     }
 
+    /** Re-resolves the live storage facade for one bus handle and key channel. */
+    @Nullable
+    private MEStorage busStorage(Scriptable handle, AEKeyType channel) {
+        var bus = resolveBus(requireBus(handle)).orElse(null);
+        var target = bus == null ? null : bus.target().orElse(null);
+        return target == null ? null : target.storage(channel);
+    }
+
+    /**
+     * The registries used to (de)serialize AE keys. During handler execution the
+     * bound workflow context wins; during program loading (pattern registration)
+     * no context exists yet, so the running server's registry access is used
+     * instead. Key codecs like Mekanism's {@code Chemical.HOLDER_CODEC} resolve
+     * via their own static registries, so both sources decode correctly.
+     */
+    private HolderLookup.Provider registries() {
+        if (context != null) {
+            return context.registries();
+        }
+        var server = ServerLifecycleHooks.getCurrentServer();
+        if (server == null) {
+            throw new IllegalStateException("No registry context available");
+        }
+        return server.registryAccess();
+    }
+
+    private AEKeyType requireStorageChannel(Scriptable receiver) {
+        var value = ScriptableObject.getProperty(receiver, STORAGE_CHANNEL_PROPERTY);
+        var channel = value == Scriptable.NOT_FOUND
+                ? null
+                : resolveChannel(Context.toString(value));
+        if (channel == null) {
+            throw scriptError("Storage handle is invalid or unavailable");
+        }
+        return channel;
+    }
+
+    private static void requireSameChannel(
+            List<FactoryResource> resources, AEKeyType channel, String name) {
+        for (var resource : resources) {
+            if (resource.key().getType() != channel) {
+                throw scriptError(name + " requires resources of channel "
+                        + channel.getId() + ", got " + resource.key().getType().getId());
+            }
+        }
+    }
+
+    /** Resolves a script channel argument: an AE key type id or a friendly alias. */
+    private static AEKeyType resolveChannel(String channel) {
+        var id = ResourceLocation.tryParse(channel);
+        if (id != null) {
+            try {
+                return AEKeyTypes.get(id);
+            } catch (IllegalArgumentException ignored) {
+                // Fall through to the friendly aliases.
+            }
+        }
+        return switch (channel) {
+            case "item" -> AEKeyType.items();
+            case "fluid" -> AEKeyType.fluids();
+            default -> throw scriptError("Unknown resource channel: " + channel);
+        };
+    }
+
+    /** The full saved fluid key data as a read-only JS tree. */
+    private Scriptable fluidNbtObject(Context cx, AEFluidKey fluidKey) {
+        var tag = fluidKey.toStack(1).save(registries());
+        return (Scriptable) NbtJs.toJs(cx, scope, tag);
+    }
+
     /**
      * Converts a job-level action result back into the value the suspended API call
      * returns.
@@ -1166,18 +1493,6 @@ final class RuntimeBridge {
         var pending = cx.captureContinuation();
         pending.setApplicationState(action);
         throw pending;
-    }
-
-    private static List<FactoryResource> resources(List<ItemStack> stacks) {
-        var amounts = new LinkedHashMap<AEKey, Long>();
-        for (var stack : stacks) {
-            if (!stack.isEmpty()) {
-                amounts.merge(AEItemKey.of(stack), (long) stack.getCount(), Math::addExact);
-            }
-        }
-        return amounts.entrySet().stream()
-                .map(entry -> new FactoryResource(entry.getKey(), entry.getValue()))
-                .toList();
     }
 
     private static List<GenericStack> genericStacks(List<FactoryResource> resources) {

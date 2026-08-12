@@ -646,9 +646,9 @@ public final class FactoryProgram {
 
     /**
      * A cheap hash of exactly the watched topology: each initializer network's online state and
-     * bus set, plus each bus target's machine identity. Computed only when a change event marks
-     * the environment dirty (never per tick) and compared against {@link #lastSignature} to skip
-     * spurious initializer re-runs.
+     * bus set, plus each bus target's identity and available key channels. Computed only when a
+     * change event marks the environment dirty (never per tick) and compared against
+     * {@link #lastSignature} to skip spurious initializer re-runs.
      */
     private long topologySignature() {
         long result = 1;
@@ -662,12 +662,11 @@ public final class FactoryProgram {
             result = 31 * result + Boolean.hashCode(online.contains(side));
             for (var bus : buses.getOrDefault(side, List.of())) {
                 result = 31 * result + bus.address().hashCode();
-                var machine = bus.machine().orElse(null);
-                result = 31 * result + (machine == null ? 0 : machine.blockId().hashCode());
-                result = 31 * result + Boolean.hashCode(
-                        machine != null && machine.hasItemStorage());
-                result = 31 * result + (machine == null || machine.blockEntityTypeId() == null
-                        ? 0 : machine.blockEntityTypeId().hashCode());
+                var target = bus.target().orElse(null);
+                result = 31 * result + (target == null ? 0 : target.blockId().hashCode());
+                result = 31 * result + (target == null ? 0 : target.channels().hashCode());
+                result = 31 * result + (target == null || target.blockEntityTypeId() == null
+                        ? 0 : target.blockEntityTypeId().hashCode());
             }
         }
         return result;
