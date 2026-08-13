@@ -54,6 +54,18 @@ go(function* () {
 });
 ```
 
+`log(message)` 把一条消息推送给订阅了该控制器日志的玩家（聊天栏），同时写入服务器日志。它不进入调度器、不需要 workflow，可在顶层、回调或 generator 内随时调用；消息由玩家在控制器程序界面勾选"订阅日志"后接收，错误通知（`reportScriptFailure` 产生的 `chat.appliedfactory.script_error`）也走同一订阅集合。
+
+```js
+log("Factory started at " + bus.target.id);
+go(function* () {
+    while (true) {
+        log("coal left: " + network("east").extract(item("minecraft:coal", -1)).amount);
+        yield sleep(20);
+    }
+});
+```
+
 ## 3. 句柄
 
 `Network`、`Bus`、存储端点和资源来源都只持有稳定地址，不持有 `BlockEntity`、AE grid、capability 或 `MEStorage` 实例。每次查询和 Action 执行时重新解析地址。

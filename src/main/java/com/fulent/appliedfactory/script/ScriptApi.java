@@ -380,6 +380,12 @@ final class JsGlobals {
         return api.renameItem(item, name);
     }
 
+    /** Prints a message to this controller's log subscribers (chat) and the server log. */
+    public Object log(String message) {
+        api.host().log(message);
+        return Undefined.instance;
+    }
+
     public Object itemNbt(Object item) {
         return api.itemNbt(item);
     }

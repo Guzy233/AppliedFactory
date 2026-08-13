@@ -69,8 +69,8 @@ public final class FactoryControllerProgramMenu extends AbstractContainerMenu
         return blockEntity == null ? "" : blockEntity.getControllerProgram();
     }
 
-    public boolean isErrorSubscribed(UUID playerId) {
-        return blockEntity != null && blockEntity.isErrorSubscribed(playerId);
+    public boolean isLogSubscribed(UUID playerId) {
+        return blockEntity != null && blockEntity.isLogSubscribed(playerId);
     }
 
     @Override

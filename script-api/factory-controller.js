@@ -9,6 +9,9 @@ function sleep(ticks) {}
 /** @param {() => Generator<Action, unknown, unknown>} factory */
 function go(factory) {}
 
+/** @param {string} message */
+function log(message) {}
+
 /**
  * @param {readonly PatternDefinition[]} patterns
  * @param {(order: Order) => Generator<Action, unknown, unknown>} handler

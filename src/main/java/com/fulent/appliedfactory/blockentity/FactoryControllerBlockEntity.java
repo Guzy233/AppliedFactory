@@ -76,6 +76,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private static final double MAX_POWER_TRANSFER_PER_NETWORK = 1_024.0D;
     private static final double POWER_EPSILON = 0.0001D;
     private static final String ESCROW_NBT_KEY = "FactoryEscrow";
+    /** Persistent key is "ErrorSubscribers" for legacy saves; the set now means log subscribers. */
     private static final String ERROR_SUBSCRIBERS_NBT_KEY = "ErrorSubscribers";
     private static final String ERROR_SUBSCRIBER_ID_NBT_KEY = "Id";
     private final FactoryEscrow escrow = new FactoryEscrow(this::setChanged);
@@ -86,7 +87,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             new EnumMap<>(Direction.class);
     private final Map<Direction, IManagedGridNode> networkNodes =
             new EnumMap<>(Direction.class);
-    private final Set<UUID> errorSubscribers = new LinkedHashSet<>();
+    private final Set<UUID> logSubscribers = new LinkedHashSet<>();
     private final Set<String> reportedScriptFailures = new LinkedHashSet<>();
 
     private List<OfferedPattern> offeredPatterns = List.of();
@@ -160,13 +161,13 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         controllerProgram = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
                 ? tag.getString(ControllerProgram.NBT_KEY)
                 : ControllerProgram.DEFAULT_SOURCE;
-        errorSubscribers.clear();
+        logSubscribers.clear();
         reportedScriptFailures.clear();
         var savedSubscribers = tag.getList(ERROR_SUBSCRIBERS_NBT_KEY, Tag.TAG_COMPOUND);
         for (int index = 0; index < savedSubscribers.size(); index++) {
             var subscriber = savedSubscribers.getCompound(index);
             if (subscriber.hasUUID(ERROR_SUBSCRIBER_ID_NBT_KEY)) {
-                errorSubscribers.add(subscriber.getUUID(ERROR_SUBSCRIBER_ID_NBT_KEY));
+                logSubscribers.add(subscriber.getUUID(ERROR_SUBSCRIBER_ID_NBT_KEY));
             }
         }
         program = createProgram(controllerProgram);
@@ -180,7 +181,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         tag.put(ESCROW_NBT_KEY, escrow.save(registries));
         tag.putString(ControllerProgram.NBT_KEY, controllerProgram);
         var savedSubscribers = new ListTag();
-        for (var subscriber : errorSubscribers) {
+        for (var subscriber : logSubscribers) {
             var subscriberTag = new CompoundTag();
             subscriberTag.putUUID(ERROR_SUBSCRIBER_ID_NBT_KEY, subscriber);
             savedSubscribers.add(subscriberTag);
@@ -242,12 +243,12 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         return controllerProgram;
     }
 
-    public boolean isErrorSubscribed(UUID playerId) {
-        return errorSubscribers.contains(playerId);
+    public boolean isLogSubscribed(UUID playerId) {
+        return logSubscribers.contains(playerId);
     }
 
-    public void updateErrorSubscription(UUID playerId, boolean subscribed) {
-        if (subscribed ? errorSubscribers.add(playerId) : errorSubscribers.remove(playerId)) {
+    public void updateLogSubscription(UUID playerId, boolean subscribed) {
+        if (subscribed ? logSubscribers.add(playerId) : logSubscribers.remove(playerId)) {
             markChangedAndSync();
         }
     }
@@ -512,17 +513,31 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     @Override
     public void reportScriptFailure(String stage, String message) {
         AppliedFactory.LOGGER.error("Factory {} failed: {}", stage, message);
-        if (!reportedScriptFailures.add(stage + '\n' + message)
-                || !(level instanceof ServerLevel serverLevel)) {
+        if (!reportedScriptFailures.add(stage + '\n' + message)) {
             return;
         }
-
-        var notification = Component.translatable(
+        sendToLogSubscribers(Component.translatable(
                 "chat.appliedfactory.script_error",
                 Component.literal(worldPosition.toShortString()),
                 Component.literal(stage),
-                Component.literal(message)).withStyle(ChatFormatting.RED);
-        for (var subscriber : errorSubscribers) {
+                Component.literal(message)).withStyle(ChatFormatting.RED));
+    }
+
+    @Override
+    public void log(String message) {
+        AppliedFactory.LOGGER.info("Factory {} log: {}", worldPosition.toShortString(), message);
+        sendToLogSubscribers(Component.translatable(
+                "chat.appliedfactory.script_log",
+                Component.literal(worldPosition.toShortString()),
+                Component.literal(message)).withStyle(ChatFormatting.GRAY));
+    }
+
+    /** Delivers a chat notification to every player subscribed to this controller's logs. */
+    private void sendToLogSubscribers(Component notification) {
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        for (var subscriber : logSubscribers) {
             ServerPlayer player = serverLevel.getServer().getPlayerList().getPlayer(subscriber);
             if (player != null) {
                 player.sendSystemMessage(notification);

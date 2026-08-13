@@ -40,8 +40,11 @@ go(function* () {
     // Non-blocking variants are explicit.
     // const remaining = source.extract(item("minecraft:coal", -1)).to(target).now();
     for (var bus of furnaces_output) {
-      bus.extract().to(main).now();
+        var output = bus.extract();
+        if (output.length > 0) {
+            log("something returned!");
+        }
     }
-    yield sleep(20);
+    yield sleep(30);
   }
 });

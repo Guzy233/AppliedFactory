@@ -15,14 +15,14 @@ public final class NetworkHandler {
     }
 
     public static void register(RegisterPayloadHandlersEvent event) {
-        event.registrar("1").playToServer(
+        event.registrar("2").playToServer(
                 SaveControllerProgramPayload.TYPE,
                 SaveControllerProgramPayload.STREAM_CODEC,
                 NetworkHandler::handleSaveControllerProgram)
                 .playToServer(
-                        SetControllerErrorSubscriptionPayload.TYPE,
-                        SetControllerErrorSubscriptionPayload.STREAM_CODEC,
-                        NetworkHandler::handleSetControllerErrorSubscription)
+                        SetControllerLogSubscriptionPayload.TYPE,
+                        SetControllerLogSubscriptionPayload.STREAM_CODEC,
+                        NetworkHandler::handleSetControllerLogSubscription)
                 .playToClient(
                         ControllerProgramSaveResultPayload.TYPE,
                         ControllerProgramSaveResultPayload.STREAM_CODEC,
@@ -44,13 +44,13 @@ public final class NetworkHandler {
         }
     }
 
-    private static void handleSetControllerErrorSubscription(
-            SetControllerErrorSubscriptionPayload payload, IPayloadContext context) {
+    private static void handleSetControllerLogSubscription(
+            SetControllerLogSubscriptionPayload payload, IPayloadContext context) {
         var factory = controllerFor(payload.pos(), context);
         if (factory == null || !(context.player() instanceof ServerPlayer player)) {
             return;
         }
-        factory.updateErrorSubscription(player.getUUID(), payload.subscribed());
+        factory.updateLogSubscription(player.getUUID(), payload.subscribed());
     }
 
     private static void handleSaveControllerProgramResult(

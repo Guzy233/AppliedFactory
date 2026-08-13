@@ -81,6 +81,9 @@ public final class FactoryProgram {
 
         void reportScriptFailure(String stage, String message);
 
+        /** Forwards a script-printed message to this controller's log subscribers. */
+        void log(String message);
+
         void markChanged();
     }
 

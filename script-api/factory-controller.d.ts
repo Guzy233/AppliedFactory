@@ -139,6 +139,8 @@ declare function registerProcessingPattern(
     patterns: readonly PatternDefinition[],
     handler: (order: Order) => Generator<Action, unknown, unknown>
 ): void;
+/** 把消息推送给订阅了该控制器日志的玩家，并写入服务器日志；可随时调用。 */
+declare function log(message: string): void;
 
 /** components 是 1.21+ data component patch，而不是完整物品保存 NBT。 */
 declare function item(id: string, amount: number, components?: NbtCompound): ResourceSpec;

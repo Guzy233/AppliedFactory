@@ -3,7 +3,7 @@ package com.fulent.appliedfactory.client;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
 import com.fulent.appliedfactory.network.ControllerProgramSaveResultPayload;
 import com.fulent.appliedfactory.network.SaveControllerProgramPayload;
-import com.fulent.appliedfactory.network.SetControllerErrorSubscriptionPayload;
+import com.fulent.appliedfactory.network.SetControllerLogSubscriptionPayload;
 import com.fulent.appliedfactory.script.ControllerProgram;
 
 import net.minecraft.client.gui.GuiGraphics;
@@ -26,7 +26,7 @@ public final class FactoryControllerProgramScreen
     private static final int HEADER_HEIGHT = 50;
 
     private MultiLineEditBox scriptBox;
-    private Checkbox errorSubscription;
+    private Checkbox logSubscription;
     private final UUID viewerId;
     private Component saveStatus = Component.empty();
     private int saveStatusColor = 0xffa9d8e9;
@@ -65,11 +65,11 @@ public final class FactoryControllerProgramScreen
                 .bounds(leftPos + imageWidth - 62, topPos + 5, 56, 18)
                 .build());
 
-        errorSubscription = addRenderableWidget(Checkbox.builder(
-                        Component.translatable("gui.appliedfactory.subscribe_errors"), font)
+        logSubscription = addRenderableWidget(Checkbox.builder(
+                        Component.translatable("gui.appliedfactory.subscribe_logs"), font)
                 .pos(leftPos + MARGIN, topPos + 28)
-                .selected(menu.isErrorSubscribed(viewerId))
-                .onValueChange((checkbox, selected) -> setErrorSubscription(selected))
+                .selected(menu.isLogSubscribed(viewerId))
+                .onValueChange((checkbox, selected) -> setLogSubscription(selected))
                 .maxWidth(120)
                 .build());
     }
@@ -81,8 +81,8 @@ public final class FactoryControllerProgramScreen
                 menu.getBlockPos(), scriptBox.getValue()));
     }
 
-    private void setErrorSubscription(boolean subscribed) {
-        PacketDistributor.sendToServer(new SetControllerErrorSubscriptionPayload(
+    private void setLogSubscription(boolean subscribed) {
+        PacketDistributor.sendToServer(new SetControllerLogSubscriptionPayload(
                 menu.getBlockPos(), subscribed));
     }
 
@@ -147,7 +147,7 @@ public final class FactoryControllerProgramScreen
     @Override
     protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
         graphics.drawString(font, title, 10, 10, 0xffd7f4ff);
-        var statusX = MARGIN + errorSubscription.getWidth() + 8;
+        var statusX = MARGIN + logSubscription.getWidth() + 8;
         var statusWidth = imageWidth - statusX - MARGIN;
         var truncatedStatus = font.plainSubstrByWidth(saveStatus.getString(), statusWidth);
         graphics.drawString(font, truncatedStatus, statusX, 32, saveStatusColor);

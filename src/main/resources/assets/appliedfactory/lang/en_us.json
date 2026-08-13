@@ -10,6 +10,7 @@
   "gui.appliedfactory.saving": "Saving…",
   "gui.appliedfactory.save_success": "Saved",
   "gui.appliedfactory.syntax_error": "Syntax error: %s",
-  "gui.appliedfactory.subscribe_errors": "Subscribe to errors",
-  "chat.appliedfactory.script_error": "Factory controller %s script error (%s): %s"
+  "gui.appliedfactory.subscribe_logs": "Subscribe to logs",
+  "chat.appliedfactory.script_error": "Factory controller %s script error (%s): %s",
+  "chat.appliedfactory.script_log": "Factory controller %s script log: %s"
 }
