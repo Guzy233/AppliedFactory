@@ -11,7 +11,7 @@ const production = network("south");
 
 registerProcessingPattern(patterns, function* (order) {
     const furnace = production.buses.find(bus =>
-        bus.target !== null && bus.target.id === "minecraft:furnace"
+        bus.target.id === "minecraft:furnace"
     );
 
     yield order.input.pushExactlyInto(furnace);

@@ -2,6 +2,8 @@
 
 > 状态：破坏性重构后的 MVP 契约。旧 `ctx` API、Rhino continuation、任务调用栈持久化和玩家安装的缓存元件均不再兼容。
 
+> API 类型与签名以 [factory-controller.d.ts](../script-api/factory-controller.d.ts) 为准，本文只描述运行模型与行为语义。
+
 ## 1. 运行模型
 
 控制器脚本使用 Rhino ES6 编译模式。脚本在控制器加载时求值一次，用全局函数取得句柄、注册 processing pattern，并启动 generator workflow。
@@ -17,7 +19,7 @@ registerProcessingPattern(
     }],
     function* (order) {
         const furnace = production.buses.find(bus =>
-            bus.target !== null && bus.target.id === "minecraft:furnace"
+            bus.target.id === "minecraft:furnace"
         );
 
         yield order.input.pushExactlyInto(furnace);
@@ -38,22 +40,7 @@ generator 只存在于当前 JVM 内存中，不序列化。服务器重启或�
 
 ## 2. 全局 API
 
-MVP 不再把方法集中在 `ctx` 上。
-
-```ts
-network(side: Direction): Network
-sleep(ticks: number): SleepAction
-go(factory: () => Generator<Action, unknown, unknown>): void
-
-registerProcessingPattern(
-    patterns: readonly PatternDefinition[],
-    handler: (order: Order) => Generator<Action, unknown, unknown>
-): void
-
-item(id: string, amount: number): ResourceSpec
-stack(channel: string, id: string, amount: number): ResourceSpec
-stackTag(serializedKey: string, amount: number): ResourceSpec
-```
+全局函数签名与类型见 [factory-controller.d.ts](../script-api/factory-controller.d.ts)，不在此重复。
 
 `go(function* () { ... })` 注册一条被动 workflow。顶层脚本本身不是 generator，因此不能在顶层直接写 `yield`。
 
@@ -82,51 +69,11 @@ Bus 句柄只绑定总线地址，不保存目标机器身份：
 
 若脚本缓存依赖目标机器类型，玩家可以重新保存脚本，或在 `network.onChange` 回调中重新枚举 `network.buses`。MVP 不提供机器身份追踪、自动重新选择目标或机器池。
 
-```ts
-interface Network {
-    readonly side: Direction;
-    readonly buses: readonly Bus[];
-
-    readonly online: boolean;
-    onChange(callback: () => void): void;
-    extract(spec?: ResourceSpec): Resource;
-}
-
-interface Bus {
-    readonly target: BlockView | null;
-    readonly targetFace: Direction;
-
-    readonly exists: boolean;
-    extract(spec?: ResourceSpec): Resource;
-}
-```
-
 `network.buses` 每次读取均返回当前拓扑快照。`onChange` 注册同步、不可挂起的拓扑变化回调；回调中可以重建脚本保存的句柄数组，但不能 `yield`。
 
 ## 4. Resource
 
-```text
-Resource
-├── origin：当前资源来源句柄
-└── bundle：确定的 AEKey → amount
-```
-
-Resource 是不可变值。它不会在创建时把普通端点中的资源提取到控制器，也不会锁定机器或网络库存。
-
-```ts
-interface Resource {
-    readonly origin: ResourceOrigin;
-    readonly bundle: readonly ResourceAmount[];
-
-    to(target: ResourceTarget): TransferAction;
-    pushExactlyInto(target: ResourceTarget): TransferAction;
-}
-
-interface ResourceOrigin {
-    readonly kind: "network" | "bus" | "order";
-    readonly endpoint: Network | Bus | null;
-}
-```
+Resource 是不可变值 `(origin, bundle)`。它不会在创建时把普通端点中的资源提取到控制器，也不会锁定机器或网络库存。
 
 `extract()` 只读取来源当前可用资源，并生成带来源的 Resource：
 
@@ -152,13 +99,6 @@ OrderEscrowOrigin(orderId)
 ```
 
 `order.input` 是指向该分配的 Resource，因此不会被其他订单或外部设备消费。
-
-```ts
-interface Order {
-    readonly input: Resource;
-    readonly network: Network;
-}
-```
 
 物理数据可以聚合存放，但账本必须按 `orderId` 隔离。不得只维护一个全局 `AEKey → amount` 池，否则相同输入的订单会互相消费。
 
@@ -269,15 +209,4 @@ public final class JsResource {
 - 总线暂时无法解析或目标机器不提供所需存储：Action 保持等待；
 - 单纯缺少来源资源或目标容量：保持等待，并向 UI 暴露缺少的 bundle 或目标满状态。
 
-隐形托管资源的数据量很小，可以与控制器 NBT 一起保存；这不要求保存 JavaScript generator 或调用栈。
-
-## 10. MVP 暂不实现
-
-- generator 和局部变量跨服务器重启恢复；
-- 旧 `ctx` API 兼容层；
-- 玩家安装的控制器 AE cell；
-- 自动机器选择、机器池、租约和并发锁；
-- 端点移动后的身份保持；
-- 多 workflow 并行组合、Promise、async/await；
-- Action timeout、取消令牌和复杂失败原因对象；
-- 任意 Java 对象的 Rhino 原生反射访问。
+隐形托管资源的数据量很小，与控制器 NBT 一起保存。
