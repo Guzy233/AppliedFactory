@@ -319,7 +319,50 @@ public final class JsResource {
 
 核心资源和调度类型不依赖 Rhino；facade 只持有核心对象或句柄。
 
-## 11. 生命周期与失败语义
+## 11. 导出参考数据（本地）
+
+配方与 channel 都是服务端运行时数据。为避免网络传输，用**本地存档**导出：用与整合包相同的 mod 在单人世界打开一个本地存档，执行：
+
+```text
+/appliedfactory export [输出目录]
+```
+
+- 服务端把全部配方（`RecipeManager.getRecipes()`）与全部注册 channel（`AEKeyTypes.getAll()`）序列化到 `<游戏根目录>/appliedscripts/`：
+  - `processing_recipes.json`：以配方 id 为键，每项含 `type`、`machine`（`Recipe.getToastSymbol()` 的机器方块 id，如 `minecraft:furnace`）以及 `recipe`（该配方的**原始 JSON**，用 `Recipe.CODEC` 重新编码）；个别无法重编码的配方只保留 `type`/`machine`。排除 AE 里属于 crafting 而非处理的配方类型：`minecraft:crafting`（工作台）、`minecraft:stonecutting`（切石机）、`minecraft:smithing`（锻造台）；
+  - `channels.json`：每个 channel 的 `id` 与显示名；
+- 输出目录省略时是 `<游戏根目录>/appliedscripts`；传参可改绝对或相对路径；
+- 顺带尽力把 `type ResourceChannel` 联合类型写进开发项目的 `script-api/factory-controller.d.ts`（开发布局下游戏目录是 `<项目>/run`，声明在 `<项目>/script-api/`），供 IDE 补全；
+- 即便实际游玩的是远程服务器，只要在本地用同整合包开一个存档导出即可，文件始终落在本地。
+
+## 12. 脚本内配方查询
+
+`recipes()` 返回从服务器 `RecipeManager` 惰性构建的配方索引，覆盖全部**处理类配方**（已排除 `minecraft:crafting`/`minecraft:stonecutting`/`minecraft:smithing`）。它只提供查询与原始 JSON，**不直接生成样板**——AE 不支持 tag 输入，注册仍走现有 `registerProcessingPattern`，由脚本自行从原始 JSON 解析出具体物品 key：
+
+```js
+const r = recipes();
+
+// 方块 ↔ 配方类型互查（一般多对一：一种配方类型可被多种机器处理）
+r.typesOfMachine("minecraft:furnace");   // ["minecraft:smelting"]
+r.machinesOfType("minecraft:smelting");  // ["minecraft:furnace", ...]
+
+// 配方类型 → 配方（唯一语义）
+const smelt = r.byType("minecraft:smelting");
+
+// 自行解析原始 JSON 取物品，用现有注册器注册
+const iron = smelt.find(x => x.id.includes("raw_iron"));
+const json = iron.json;                     // 原始配方 JSON 对象
+const inputs = [item(json.ingredient.item, 1)];
+const outputs = [item(json.result.id, json.result.count ?? 1)];
+registerProcessingPattern([{ orderNetwork: "west", inputs, outputs }], function* (order) {
+  yield order.input.pushExactlyInto(furnaceBus);
+});
+```
+
+- `recipes().all()` / `byType(typeId)` 返回 `Recipe[]`（真实数组，可直接 `filter`/`map`）；
+- 每个 `Recipe` 含 `id`、`type`、`machine`（`getToastSymbol()` 的机器物品 id）、`json`（原始配方 JSON；无法重编码时为 null）；
+- 机器与方块共用注册表，`machine` 直接与 `bus.target.id` 比较。
+
+## 13. 生命周期与失败语义
 
 - 脚本保存或重载：先创建新 runtime；成功后终止旧 generator，其托管资源进入恢复流程；
 - 服务器重启：不恢复 generator 调用点；

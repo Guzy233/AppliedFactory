@@ -152,3 +152,29 @@ declare function stack(channel: ResourceChannel, key: NbtCompound, amount: numbe
 declare function rename(item: Resource, name: string): Resource | null;
 /** 读取完整 ItemStack 保存 NBT；不是 ae2:i 时抛出运行时错误。 */
 declare function itemNbt(item: Resource): NbtCompound;
+
+/** 处理类配方（已排除合成/切石/锻造）。json 为原始配方 JSON，自行解析取物品注册。 */
+interface Recipe {
+    readonly id: string;
+    /** 配方类型 id，如 "minecraft:smelting"。 */
+    readonly type: string;
+    /** 机器方块物品 id（Recipe#getToastSymbol()），如 "minecraft:furnace"；无则 null。 */
+    readonly machine: string | null;
+    /** 原始配方 JSON；无法重编码时为 null。 */
+    readonly json: Record<string, NbtValue> | null;
+}
+
+/** 配方索引：方块 ↔ 配方类型互查，再由类型查配方（唯一语义）。 */
+interface RecipeIndex {
+    /** 全部处理配方。 */
+    all(): Recipe[];
+    /** 按配方类型查配方，如 "minecraft:smelting"。 */
+    byType(typeId: string): Recipe[];
+    /** 方块可处理的配方类型，如 "minecraft:furnace" → ["minecraft:smelting"]。 */
+    typesOfMachine(machineId: string): string[];
+    /** 某配方类型涉及的机器方块 id。 */
+    machinesOfType(typeId: string): string[];
+}
+
+/** 从服务器 RecipeManager 构建的配方索引（脚本运行时惰性构建）。 */
+declare function recipes(): RecipeIndex;

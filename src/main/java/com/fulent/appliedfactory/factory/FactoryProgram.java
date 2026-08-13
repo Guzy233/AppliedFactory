@@ -8,6 +8,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import org.jetbrains.annotations.Nullable;
+
 import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgramCompiler;
@@ -34,6 +36,13 @@ public final class FactoryProgram {
         Set<Direction> onlineNetworks();
 
         Optional<FactoryBusTarget> busTarget(FactoryBusAddress address);
+
+        /**
+         * Lazily-built index of all processing recipes, or null when there is no
+         * server to read them from (e.g. client-side).
+         */
+        @Nullable
+        FactoryRecipeIndex recipeIndex();
 
         List<FactoryResource> availableResources(FactoryEndpoint endpoint);
 

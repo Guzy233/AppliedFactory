@@ -25,6 +25,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.common.extensions.IMenuTypeExtension;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
 import net.neoforged.fml.common.Mod;
@@ -86,6 +87,9 @@ public final class AppliedFactory {
         modEventBus.addListener(NetworkHandler::register);
         
         FactoryBusPart.registerModels();
+
+        NeoForge.EVENT_BUS.addListener(
+                com.fulent.appliedfactory.command.ExportCommand::register);
     }
 
     private void commonSetup(FMLCommonSetupEvent event) {

@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.jetbrains.annotations.Nullable;
 import org.mozilla.javascript.Context;
 import org.mozilla.javascript.Function;
 import org.mozilla.javascript.NativeArray;
@@ -17,6 +18,8 @@ import com.fulent.appliedfactory.factory.FactoryAction;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
 import com.fulent.appliedfactory.factory.FactoryProgram;
+import com.fulent.appliedfactory.factory.FactoryRecipe;
+import com.fulent.appliedfactory.factory.FactoryRecipeIndex;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.factory.FactoryResourceOrigin;
 import com.fulent.appliedfactory.factory.FactoryResourceRef;
@@ -139,6 +142,11 @@ final class ScriptApi {
 
     List<String> channels(FactoryBusAddress bus) {
         return host.channels(bus);
+    }
+
+    @Nullable
+    FactoryRecipeIndex recipeIndex() {
+        return host.recipeIndex();
     }
 
     JsOrder order(ScriptExecutionContext context) {
@@ -346,6 +354,10 @@ final class JsGlobals {
 
     public JsSleepAction sleep(int ticks) {
         return new JsSleepAction(new FactorySleepAction(ticks));
+    }
+
+    public JsRecipes recipes() {
+        return new JsRecipes(api);
     }
 
     public Object go(Function factory) {
@@ -856,6 +868,80 @@ final class JsSleepAction {
 
     FactoryAction action() {
         return action;
+    }
+}
+
+@JsBridge
+final class JsRecipes {
+    private final ScriptApi api;
+
+    JsRecipes(ScriptApi api) {
+        this.api = api;
+    }
+
+    @Nullable
+    private FactoryRecipeIndex index() {
+        return api.recipeIndex();
+    }
+
+    /** All processing recipes (crafting/stonecutter/smithing excluded). */
+    public List<JsRecipe> all() {
+        var index = index();
+        return index == null ? List.of() : index.all().stream().map(JsRecipe::new).toList();
+    }
+
+    /** Recipes of one recipe type, e.g. {@code minecraft:smelting}. */
+    public List<JsRecipe> byType(String typeId) {
+        var index = index();
+        return index == null ? List.of() : index.ofType(typeId).stream().map(JsRecipe::new).toList();
+    }
+
+    /** Recipe types a machine block can process, e.g. {@code minecraft:furnace}. */
+    public List<String> typesOfMachine(String machineId) {
+        var index = index();
+        return index == null ? List.of() : index.typesOfMachine(machineId);
+    }
+
+    /** Machine block ids found among recipes of one recipe type. */
+    public List<String> machinesOfType(String typeId) {
+        var index = index();
+        return index == null ? List.of() : index.machinesOfType(typeId);
+    }
+}
+
+@JsBridge
+final class JsRecipe {
+    private final FactoryRecipe recipe;
+
+    JsRecipe(FactoryRecipe recipe) {
+        this.recipe = recipe;
+    }
+
+    @JsProperty
+    public String getId() {
+        return recipe.id();
+    }
+
+    @JsProperty
+    public String getType() {
+        return recipe.type();
+    }
+
+    @JsProperty
+    @Nullable
+    public String getMachine() {
+        return recipe.machine();
+    }
+
+    /**
+     * The recipe's raw JSON (Gson-decoded object graph). Scripts parse it to pick
+     * concrete input/output keys and register patterns with
+     * {@code registerProcessingPattern}; AE itself does not support tag inputs.
+     */
+    @JsProperty
+    @Nullable
+    public Object getJson() {
+        return recipe.json();
     }
 }
 
