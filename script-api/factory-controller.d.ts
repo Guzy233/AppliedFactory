@@ -85,6 +85,8 @@ interface Bus {
     readonly targetFace: Direction;
     /** 总线面对的方块；无方块或区块未加载时为空气（minecraft:air），永不为 null。 */
     readonly target: BlockView;
+    /** 目标面当前支持输入/输出的资源 channel id 列表（如 "ae2:i"、"ae2:f"），不依赖实际库存。 */
+    readonly channels: readonly string[];
 
     /** 无参数时返回当前精确资源句柄快照。 */
     extract(): ResourceArray;

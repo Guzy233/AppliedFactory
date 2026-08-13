@@ -391,6 +391,16 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public List<String> channels(FactoryBusAddress bus) {
+        return resolveBusTarget(bus)
+                .map(target -> target.channels().stream()
+                        .map(type -> type.getId().toString())
+                        .sorted()
+                        .toList())
+                .orElseGet(List::of);
+    }
+
+    @Override
     public long availableAmount(FactoryResourceOrigin origin, AEKey key) {
         return actionExecutor.available(origin, key);
     }

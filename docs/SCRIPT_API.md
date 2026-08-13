@@ -81,6 +81,8 @@ Bus 句柄只绑定总线地址，不保存目标机器身份：
 
 `network.buses` 每次读取均返回当前拓扑快照。`onChange` 注册同步、不可挂起的拓扑变化回调；回调中可以重建脚本保存的句柄数组，但不能 `yield`。
 
+`bus.channels` 返回目标面当前支持输入/输出的资源 channel id 数组（如 `"ae2:i"`、`"ae2:f"`），**不依赖目标是否实际含有资源**：它反映该面对每个已注册 AE channel 是否暴露了能力（如熔炉顶面能放输入、底面能取产物），通过 AE2 的策略注册表查询，覆盖任意扩展 channel。可用于脚本自行发现目标机器支持哪些资源类型，而不必依赖 `extract()` 的库存内容或枚举全部注册 channel。
+
 ## 4. Resource
 
 Resource 是统一、不可变的精确来源句柄 `(origin, channel, key, amount)`。`channel` 直接使用 `AEKeyType#getId()` 的注册表 ID；`key` 是对应 `AEKeyType` codec 自己的 NBT。内置物品和流体 channel 分别为 `"ae2:i"`、`"ae2:f"`，扩展 channel 不需要声明新 Resource 类型或编写 Java 适配器。Resource 不会在创建时提取或锁定普通端点库存。

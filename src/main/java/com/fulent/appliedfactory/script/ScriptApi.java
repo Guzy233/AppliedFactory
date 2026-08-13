@@ -14,6 +14,7 @@ import org.mozilla.javascript.ScriptableObject;
 import org.mozilla.javascript.Undefined;
 
 import com.fulent.appliedfactory.factory.FactoryAction;
+import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
 import com.fulent.appliedfactory.factory.FactoryProgram;
 import com.fulent.appliedfactory.factory.FactoryResource;
@@ -134,6 +135,10 @@ final class ScriptApi {
                 ? null
                 : resourceValue(new FactoryResourceRef(
                         origin, List.of(new FactoryResource(spec.key(), amount))));
+    }
+
+    List<String> channels(FactoryBusAddress bus) {
+        return host.channels(bus);
     }
 
     JsOrder order(ScriptExecutionContext context) {
@@ -567,6 +572,11 @@ final class JsBus {
     @JsProperty
     public String getTargetFace() {
         return address.side().getOpposite().getName();
+    }
+
+    @JsProperty
+    public List<String> getChannels() {
+        return api.channels(address);
     }
 
     @JsProperty
