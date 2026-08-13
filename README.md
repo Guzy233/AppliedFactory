@@ -2,7 +2,7 @@
 
 Applied Factory 使用 JavaScript generator 编排 Applied Energistics 2 网络和工厂总线。
 
-当前版本正在进行破坏性 MVP 重构，公开契约见 [脚本 API](docs/SCRIPT_API.md)。旧版 `ctx`、Rhino continuation、任务调用栈序列化和玩家安装的控制器缓存元件不再兼容。
+公开契约见 [脚本 API](docs/SCRIPT_API.md)。
 
 目标脚本形式：
 

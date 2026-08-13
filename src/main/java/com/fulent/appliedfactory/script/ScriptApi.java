@@ -59,6 +59,7 @@ final class ScriptApi {
 
     void install() {
         binder.installGlobals(new JsGlobals(this));
+        ScriptableObject.putProperty(scope, "console", binder.wrap(new JsConsole(host)));
     }
 
     void bind(ScriptExecutionContext context) {
@@ -341,8 +342,7 @@ final class ScriptApi {
 }
 
 @JsBridge
-final class JsGlobals {
-    private final ScriptApi api;
+final class JsGlobals {    private final ScriptApi api;
 
     JsGlobals(ScriptApi api) {
         this.api = api;
@@ -963,5 +963,30 @@ final class JsOrder {
     @JsProperty
     public JsNetwork getNetwork() {
         return network;
+    }
+}
+
+/** {@code console.log/warn/error} convenience mirror of the {@code log()} global. */
+@JsBridge
+final class JsConsole {
+    private final FactoryProgram.Host host;
+
+    JsConsole(FactoryProgram.Host host) {
+        this.host = host;
+    }
+
+    public Object log(String message) {
+        host.log(message);
+        return Undefined.instance;
+    }
+
+    public Object warn(String message) {
+        host.log(message);
+        return Undefined.instance;
+    }
+
+    public Object error(String message) {
+        host.log(message);
+        return Undefined.instance;
     }
 }

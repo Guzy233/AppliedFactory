@@ -14,6 +14,7 @@ import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgramCompiler;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
+import com.fulent.appliedfactory.script.ScriptExecutionContext;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
 import com.fulent.appliedfactory.script.ScriptRuntime;
 import com.fulent.appliedfactory.script.ScriptStep;
@@ -121,8 +122,21 @@ public final class FactoryProgram {
     }
 
     public static ProgramLoadResult<FactoryProgram> load(String source, Host host) {
+        return load(source, host, null);
+    }
+
+    /**
+     * Loads a program like {@link #load(String, Host)} but optionally binds a
+     * {@link ScriptExecutionContext} for the duration of the top-level evaluation.
+     * MCP probe programs use this so {@code .now()} calls in top-level expressions work,
+     * matching generator workflows.
+     */
+    public static ProgramLoadResult<FactoryProgram> load(
+            String source,
+            Host host,
+            @Nullable ScriptExecutionContext topLevelContext) {
         var runtime = ControllerProgramCompiler.createRuntime(host);
-        var result = runtime.loadProgram(source);
+        var result = runtime.loadProgram(source, topLevelContext);
         if (!result.successful()) {
             return ProgramLoadResult.failure(result.errorMessage());
         }
@@ -147,8 +161,32 @@ public final class FactoryProgram {
         return program;
     }
 
+    /** Number of go(function*(){...}) registrations in the evaluated source. */
+    public int passiveHandlerCount() {
+        return program.passiveHandlerCount();
+    }
+
     public boolean canAcceptJobs() {
         return activeProcessingJobs() < MAX_JOBS && host.escrowIds().size() < MAX_JOBS;
+    }
+
+    /** Number of currently live generator jobs (processing, passive or probe). */
+    public int activeJobCount() {
+        return jobs.size();
+    }
+
+    /**
+     * The value of the last top-level expression of the evaluated source, serialized to
+     * JSON by the runtime (null when blank, unserializable or not captured).
+     */
+    @Nullable
+    public String lastValueJson() {
+        return runtime.lastValueJson();
+    }
+
+    /** Live jobs, package-private so the MCP probe driver can describe pending waits. */
+    List<FactoryJob> activeJobs() {
+        return jobs;
     }
 
     public boolean startJob(

@@ -18,7 +18,7 @@ public record SaveControllerProgramPayload(BlockPos pos, String source) implemen
     public static final StreamCodec<RegistryFriendlyByteBuf, SaveControllerProgramPayload> STREAM_CODEC =
             StreamCodec.composite(
                     BlockPos.STREAM_CODEC, SaveControllerProgramPayload::pos,
-                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_LENGTH),
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_LENGTH * 3),
                     SaveControllerProgramPayload::source,
                     SaveControllerProgramPayload::new);
 

@@ -1,8 +1,19 @@
 package com.fulent.appliedfactory.script;
 
+import org.jetbrains.annotations.Nullable;
+
 /** Controller-owned scripting engine for one loaded source revision. */
 public interface ScriptRuntime {
-    ProgramLoadResult<CompiledControllerProgram> loadProgram(String source);
+    default ProgramLoadResult<CompiledControllerProgram> loadProgram(String source) {
+        return loadProgram(source, null);
+    }
+
+    /**
+     * @param topLevelContext when non-null, binds a transient workflow context during the
+     *                        top-level evaluation so {@code .now()} works there too
+     */
+    ProgramLoadResult<CompiledControllerProgram> loadProgram(
+            String source, @Nullable ScriptExecutionContext topLevelContext);
 
     ProgramLoadResult<ScriptWorkflow> createWorkflow(
             ScriptHandlerRef handler,
@@ -15,4 +26,10 @@ public interface ScriptRuntime {
             boolean firstStep);
 
     void runTopologyListeners();
+
+    /** JSON-serialized value of the last top-level expression, or null when unavailable. */
+    @Nullable
+    default String lastValueJson() {
+        return null;
+    }
 }

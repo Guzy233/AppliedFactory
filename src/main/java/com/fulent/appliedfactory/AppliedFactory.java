@@ -6,6 +6,7 @@ import com.mojang.logging.LogUtils;
 
 import com.fulent.appliedfactory.block.FactoryControllerBlock;
 import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
+import com.fulent.appliedfactory.factory.McpProbeManager;
 import com.fulent.appliedfactory.item.FactoryBusItem;
 import com.fulent.appliedfactory.menu.FactoryBusMenu;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
@@ -90,6 +91,7 @@ public final class AppliedFactory {
 
         NeoForge.EVENT_BUS.addListener(
                 com.fulent.appliedfactory.command.ExportCommand::register);
+        McpProbeManager.register();
     }
 
     private void commonSetup(FMLCommonSetupEvent event) {

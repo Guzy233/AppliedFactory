@@ -11,6 +11,7 @@
   "gui.appliedfactory.save_success": "Saved",
   "gui.appliedfactory.syntax_error": "Syntax error: %s",
   "gui.appliedfactory.subscribe_logs": "Subscribe to logs",
+  "gui.appliedfactory.bind_mcp": "Link to MCP",
   "chat.appliedfactory.script_error": "Factory controller %s script error (%s): %s",
   "chat.appliedfactory.script_log": "Factory controller %s script log: %s"
 }

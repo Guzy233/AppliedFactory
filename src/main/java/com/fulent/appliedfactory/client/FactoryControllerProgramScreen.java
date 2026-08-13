@@ -1,5 +1,6 @@
 package com.fulent.appliedfactory.client;
 
+import com.fulent.appliedfactory.mcp.McpClientManager;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
 import com.fulent.appliedfactory.network.ControllerProgramSaveResultPayload;
 import com.fulent.appliedfactory.network.SaveControllerProgramPayload;
@@ -65,6 +66,12 @@ public final class FactoryControllerProgramScreen
                 .bounds(leftPos + imageWidth - 62, topPos + 5, 56, 18)
                 .build());
 
+        addRenderableWidget(Button.builder(
+                        Component.translatable("gui.appliedfactory.bind_mcp"),
+                        ignored -> bindToMcp())
+                .bounds(leftPos + imageWidth - 124, topPos + 5, 56, 18)
+                .build());
+
         logSubscription = addRenderableWidget(Checkbox.builder(
                         Component.translatable("gui.appliedfactory.subscribe_logs"), font)
                 .pos(leftPos + MARGIN, topPos + 28)
@@ -79,6 +86,10 @@ public final class FactoryControllerProgramScreen
         saveStatusColor = 0xffffd37a;
         PacketDistributor.sendToServer(new SaveControllerProgramPayload(
                 menu.getBlockPos(), scriptBox.getValue()));
+    }
+
+    private void bindToMcp() {
+        McpClientManager.get().requestBind(menu.getBlockPos());
     }
 
     private void setLogSubscription(boolean subscribed) {

@@ -21,13 +21,16 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
 
     private final FactoryProgram.Host host;
     private RuntimeEnvironment environment;
+    private String lastValueJson;
 
     public RhinoScriptRuntime(FactoryProgram.Host host) {
         this.host = host;
     }
 
     @Override
-    public ProgramLoadResult<CompiledControllerProgram> loadProgram(String source) {
+    public ProgramLoadResult<CompiledControllerProgram> loadProgram(
+            String source, ScriptExecutionContext topLevelContext) {
+        lastValueJson = null;
         if (source.isBlank()) {
             environment = null;
             return ProgramLoadResult.success(CompiledControllerProgram.EMPTY);
@@ -38,17 +41,37 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
                 Scriptable scope = context.initSafeStandardObjects();
                 var api = new ScriptApi(host, registration, scope);
                 api.install();
-                context.evaluateString(scope, source, SOURCE_NAME, 1, null);
+                boolean bound = topLevelContext != null;
+                if (bound) {
+                    api.bind(topLevelContext);
+                }
+                try {
+                    var value = context.evaluateString(scope, source, SOURCE_NAME, 1, null);
+                    if (bound) {
+                        var element = JsValueSerializer.serialize(context, scope, value);
+                        lastValueJson = element == null ? null : element.toString();
+                    }
+                } finally {
+                    if (bound) {
+                        api.unbind();
+                    }
+                }
                 registration.sealed = true;
                 environment = new RuntimeEnvironment(scope, registration, api);
                 return ProgramLoadResult.success(registration.manifest());
             });
         } catch (RuntimeException | RhinoInstructionLimitError exception) {
             environment = null;
+            lastValueJson = null;
             var message = messageOf(exception);
             AppliedFactory.LOGGER.warn("Failed to load factory controller program: {}", message);
             return ProgramLoadResult.failure(message);
         }
+    }
+
+    @Override
+    public String lastValueJson() {
+        return lastValueJson;
     }
 
     @Override
