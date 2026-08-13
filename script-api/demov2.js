@@ -42,6 +42,7 @@ go(function* () {
     for (var bus of furnaces_output) {
         var output = bus.extract();
         if (output.length > 0) {
+            output.to(main).now();
             log("something returned!");
         }
     }

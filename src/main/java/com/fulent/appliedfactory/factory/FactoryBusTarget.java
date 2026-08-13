@@ -374,6 +374,13 @@ public final class FactoryBusTarget {
      * strategy or the target exposes no matching capability. Both the channel
      * space and the capability adapters are owned by AE2, so third-party channels
      * are picked up automatically.
+     *
+     * <p>The wrapper is created in extractable-only mode, matching AE2's default
+     * storage-bus filter ({@code StorageFilter.EXTRACTABLE_ONLY}). A face may
+     * expose slots it can list but not pull from (e.g. a furnace's fuel slot is
+     * visible from its bottom face yet rejects {@code extractItem}), so
+     * {@code getAvailableStacks} must report only resources {@code extract} can
+     * actually move.
      */
     @Nullable
     public MEStorage storage(AEKeyType type) {
@@ -381,7 +388,7 @@ public final class FactoryBusTarget {
             return null;
         }
         var strategy = strategies(serverLevel).get(type);
-        return strategy == null ? null : strategy.createWrapper(false, NO_CHANGE_LISTENER);
+        return strategy == null ? null : strategy.createWrapper(true, NO_CHANGE_LISTENER);
     }
 
     /**
@@ -393,7 +400,7 @@ public final class FactoryBusTarget {
         }
         var result = new LinkedHashSet<AEKeyType>();
         for (var entry : strategies(serverLevel).entrySet()) {
-            if (entry.getValue().createWrapper(false, NO_CHANGE_LISTENER) != null) {
+            if (entry.getValue().createWrapper(true, NO_CHANGE_LISTENER) != null) {
                 result.add(entry.getKey());
             }
         }
