@@ -7,14 +7,12 @@ let furnaces_output = [];
 function refreshFurnaces() {
   furnaces_input = production.buses.filter(
     (bus) =>
-      bus.target !== null &&
       bus.target.id === "minecraft:furnace" &&
       bus.targetFace === "up",
   );
 
   furnaces_output = production.buses.filter(
     (bus) =>
-      bus.target !== null &&
       bus.target.id === "minecraft:furnace" &&
       bus.targetFace === "down",
   );
@@ -26,7 +24,6 @@ refreshFurnaces();
 registerProcessingPattern(
   [
     {
-      id: "iron",
       orderNetwork: "west",
       inputs: [item("minecraft:iron_ore", 1)],
       outputs: [item("minecraft:iron_ingot", 1)],

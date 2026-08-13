@@ -43,7 +43,7 @@ interface BlockView {
 interface Bus {
     readonly exists: boolean;
     readonly targetFace: Direction;
-    readonly target: BlockView | null;
+    readonly target: BlockView;
 
     /** Captures the source's current concrete bundle without removing it. */
     extract(spec?: ResourceSpec): Resource;
@@ -68,7 +68,6 @@ interface Order {
 }
 
 interface PatternDefinition {
-    readonly id: string;
     readonly orderNetwork: Direction;
     readonly inputs: readonly ResourceSpec[];
     readonly outputs: readonly ResourceSpec[];

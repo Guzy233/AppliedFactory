@@ -21,14 +21,10 @@ public record CompiledControllerProgram(
     }
 
     public record ScriptPattern(
-            String id,
             Direction orderNetwork,
             ItemStack encodedPattern,
             int handlerIndex) {
         public ScriptPattern {
-            if (id.isBlank()) {
-                throw new IllegalArgumentException("Script pattern id cannot be blank");
-            }
             Objects.requireNonNull(orderNetwork, "orderNetwork");
             encodedPattern = encodedPattern.copy();
             if (encodedPattern.isEmpty()) {

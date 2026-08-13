@@ -197,11 +197,6 @@ final class JsGlobals {
             if (!(value instanceof Scriptable definition)) {
                 throw Context.reportRuntimeError("Pattern definition must be an object");
             }
-            var id = Context.toString(ScriptApi.required(definition, "id"));
-            if (id.isBlank() || api.registration().patterns.stream()
-                    .anyMatch(pattern -> pattern.id().equals(id))) {
-                throw Context.reportRuntimeError("Pattern ids must be non-blank and unique: " + id);
-            }
             var side = ScriptApi.direction(Context.toString(
                     ScriptApi.required(definition, "orderNetwork")));
             var inputs = specs(ScriptApi.required(definition, "inputs"), "inputs");
@@ -212,7 +207,7 @@ final class JsGlobals {
             var encoded = PatternDetailsHelper.encodeProcessingPattern(
                     genericStacks(inputs), genericStacks(outputs));
             api.registration().patterns.add(new CompiledControllerProgram.ScriptPattern(
-                    id, side, encoded, handlerIndex));
+                    side, encoded, handlerIndex));
         }
         return Undefined.instance;
     }
@@ -391,9 +386,9 @@ final class JsBus {
     @JsProperty
     public JsBlockView getTarget() {
         var target = api.host().busTarget(address).orElse(null);
-        return target == null || !target.isLoaded()
-                ? null
-                : new JsBlockView(target.blockId().toString());
+        return new JsBlockView(target == null || !target.isLoaded()
+                ? "minecraft:air"
+                : target.blockId().toString());
     }
 
     public JsResource extract(Object spec) {

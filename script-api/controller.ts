@@ -5,7 +5,7 @@ let furnaces: readonly Bus[] = [];
 
 function refreshFurnaces(): void {
     furnaces = production.buses.filter(bus =>
-        bus.target !== null && bus.target.id === "minecraft:furnace"
+        bus.target.id === "minecraft:furnace"
     );
 }
 
@@ -14,7 +14,6 @@ refreshFurnaces();
 
 registerProcessingPattern(
     [{
-        id: "iron",
         orderNetwork: "north",
         inputs: [item("minecraft:iron_ore", 1)],
         outputs: [item("minecraft:iron_ingot", 1)]

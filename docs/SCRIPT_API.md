@@ -11,7 +11,6 @@ const production = network("south");
 
 registerProcessingPattern(
     [{
-        id: "iron",
         orderNetwork: "north",
         inputs: [item("minecraft:iron_ore", 1)],
         outputs: [item("minecraft:iron_ingot", 1)]
