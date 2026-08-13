@@ -2,7 +2,9 @@ package com.fulent.appliedfactory.script;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.mozilla.javascript.Context;
 import org.mozilla.javascript.Function;
@@ -30,6 +32,7 @@ import appeng.api.stacks.GenericStack;
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.level.block.state.BlockState;
 
 /** State shared by the small Java facade graph installed into one Rhino scope. */
 final class ScriptApi {
@@ -386,9 +389,34 @@ final class JsBus {
     @JsProperty
     public JsBlockView getTarget() {
         var target = api.host().busTarget(address).orElse(null);
-        return new JsBlockView(target == null || !target.isLoaded()
-                ? "minecraft:air"
-                : target.blockId().toString());
+        var position = address.hostPosition().relative(address.side());
+        if (target == null || !target.isLoaded()) {
+            return new JsBlockView(
+                    "minecraft:air", "minecraft:air",
+                    position.getX(), position.getY(), position.getZ(), Map.of());
+        }
+        var state = target.blockState();
+        return new JsBlockView(
+                target.blockId().toString(), state.toString(),
+                position.getX(), position.getY(), position.getZ(),
+                blockStateProperties(state));
+    }
+
+    private static Map<String, Object> blockStateProperties(BlockState state) {
+        var result = new LinkedHashMap<String, Object>();
+        state.getValues().forEach((property, value) ->
+                result.put(property.getName(), exposePropertyValue(value)));
+        return result;
+    }
+
+    private static Object exposePropertyValue(Object value) {
+        if (value instanceof Boolean || value instanceof Integer || value instanceof Long) {
+            return value;
+        }
+        if (value instanceof Enum<?> enumValue) {
+            return enumValue.name();
+        }
+        return value.toString();
     }
 
     public JsResource extract(Object spec) {
@@ -399,14 +427,59 @@ final class JsBus {
 @JsBridge
 final class JsBlockView {
     private final String id;
+    private final String state;
+    private final int x;
+    private final int y;
+    private final int z;
+    private final Map<String, Object> properties;
 
-    JsBlockView(String id) {
+    JsBlockView(
+            String id,
+            String state,
+            int x,
+            int y,
+            int z,
+            Map<String, Object> properties) {
         this.id = id;
+        this.state = state;
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.properties = Map.copyOf(properties);
     }
 
     @JsProperty
     public String getId() {
         return id;
+    }
+
+    @JsProperty
+    public String getState() {
+        return state;
+    }
+
+    @JsProperty
+    public int getX() {
+        return x;
+    }
+
+    @JsProperty
+    public int getY() {
+        return y;
+    }
+
+    @JsProperty
+    public int getZ() {
+        return z;
+    }
+
+    @JsProperty
+    public Map<String, Object> getProperties() {
+        return properties;
+    }
+
+    public boolean isSameBlock(JsBlockView other) {
+        return x == other.x && y == other.y && z == other.z;
     }
 }
 

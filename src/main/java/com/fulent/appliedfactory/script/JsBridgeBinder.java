@@ -5,6 +5,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Map;
 
 import org.mozilla.javascript.BaseFunction;
 import org.mozilla.javascript.Context;
@@ -41,6 +42,14 @@ final class JsBridgeBinder {
         if (value instanceof Collection<?> collection) {
             var converted = collection.stream().map(this::wrap).toArray();
             return Context.getCurrentContext().newArray(scope, converted);
+        }
+        if (value instanceof Map<?, ?> map) {
+            var object = Context.getCurrentContext().newObject(scope);
+            for (var entry : map.entrySet()) {
+                ScriptableObject.putProperty(
+                        object, Context.toString(entry.getKey()), wrap(entry.getValue()));
+            }
+            return object;
         }
         if (value.getClass().isArray()) {
             var length = java.lang.reflect.Array.getLength(value);

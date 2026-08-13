@@ -45,6 +45,17 @@ interface SleepAction {}
 
 interface BlockView {
     readonly id: string;
+    /** 完整方块状态字符串，如 "minecraft:furnace[facing=north,lit=false]"。 */
+    readonly state: string;
+    /** 目标方块坐标。 */
+    readonly x: number;
+    readonly y: number;
+    readonly z: number;
+    /** 方块状态属性表（属性名 → 值）；布尔/整数保持原类型，其余为字符串。 */
+    readonly properties: Readonly<Record<string, boolean | number | string>>;
+
+    /** 是否与另一个 BlockView 指向同一格方块（按坐标判等）。 */
+    isSameBlock(other: BlockView): boolean;
 }
 
 interface Bus {
