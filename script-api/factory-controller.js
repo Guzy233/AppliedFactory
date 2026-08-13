@@ -15,19 +15,29 @@ function go(factory) {}
  */
 function registerProcessingPattern(patterns, handler) {}
 
-/** @param {string} id @param {number} amount @returns {ResourceSpec} */
-function item(id, amount) {}
+/** @param {string} id @param {number} amount @param {object} [components] @returns {ResourceSpec} */
+function item(id, amount, components) {}
 
-/** @param {string} channel @param {string} id @param {number} amount @returns {ResourceSpec} */
-function stack(channel, id, amount) {}
+/** @param {string} channel @param {object} key @param {number} amount @returns {ResourceSpec} */
+function stack(channel, key, amount) {}
 
-/** @param {string} serializedKey @param {number} amount @returns {ResourceSpec} */
-function stackTag(serializedKey, amount) {}
+/** @param {Resource} resource @param {string} name @returns {Resource|null} */
+function rename(resource, name) {}
+
+/** @param {Resource} resource @returns {object} */
+function itemNbt(resource) {}
 
 // Resource methods:
 // resource.to(target)                    -> TransferAction
 // resource.pushExactlyInto(target)       -> ExactTransferAction
 // resource.to(target).now()              -> remaining Resource
 // resource.pushExactlyInto(target).now() -> boolean
+// resourceArray.to(target)                -> one batch TransferAction
+// rename(resource, name)                 -> renamed Resource | null (immediate)
+// itemNbt(resource)                      -> full ItemStack NBT
+// bus.drop(resource)                     -> boolean (immediate)
+// bus.use(resource)                      -> boolean; source item updated in place
+// bus.place(resource)                    -> boolean; source item updated in place
+// bus.breakBlock(tool)                   -> ResourceArray | null; synchronous
 //
 // A yielded Action waits for both source resources and destination capacity.

@@ -6,13 +6,22 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
+
+import com.google.gson.JsonParseException;
 
 import appeng.api.config.Actionable;
 import appeng.api.networking.security.IActionSource;
+import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
 import appeng.api.stacks.KeyCounter;
 import appeng.api.storage.MEStorage;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemStack;
 
 /** Resolves durable handles for each attempt and moves resources without a controller cell. */
 public final class FactoryActionExecutor {
@@ -21,20 +30,27 @@ public final class FactoryActionExecutor {
     private final FactoryEscrow escrow;
     private final BusResolver busResolver;
     private final NetworkResolver networkResolver;
+    private final Function<FactoryBusAddress, Direction> busRecoverySide;
     private final Runnable changed;
 
     public FactoryActionExecutor(
             FactoryEscrow escrow,
             BusResolver busResolver,
             NetworkResolver networkResolver,
+            Function<FactoryBusAddress, Direction> busRecoverySide,
             Runnable changed) {
         this.escrow = Objects.requireNonNull(escrow, "escrow");
         this.busResolver = Objects.requireNonNull(busResolver, "busResolver");
         this.networkResolver = Objects.requireNonNull(networkResolver, "networkResolver");
+        this.busRecoverySide = Objects.requireNonNull(busRecoverySide, "busRecoverySide");
         this.changed = Objects.requireNonNull(changed, "changed");
     }
 
     public FactoryTransferResult perform(UUID workflowId, FactoryTransferAction action) {
+        if (action.source().kind() == FactoryResourceOrigin.Kind.ESCROW
+                && !workflowId.equals(action.source().escrowId())) {
+            throw new IllegalStateException("A workflow cannot transfer another workflow's escrow");
+        }
         if (action.remaining().isEmpty()) {
             return FactoryTransferResult.complete();
         }
@@ -43,6 +59,59 @@ public final class FactoryActionExecutor {
                 : partial(workflowId, action);
         action.updateRemaining(result.remaining());
         return result;
+    }
+
+    /** Immediately renames the exact item selection in its source. */
+    public Optional<FactoryResourceRef> rename(
+            UUID workflowId,
+            FactoryResourceRef input,
+            String name,
+            HolderLookup.Provider registries) {
+        validateWorkflowOrigin(workflowId, input);
+        if (name.isBlank() || input.bundle().size() != 1
+                || !(input.bundle().getFirst().key() instanceof AEItemKey itemKey)) {
+            throw new IllegalArgumentException("rename requires one exact item resource and a name");
+        }
+        var stack = itemKey.toStack(1);
+        stack.set(DataComponents.CUSTOM_NAME, parseName(name, registries));
+        var renamed = List.of(new FactoryResource(
+                AEItemKey.of(stack), input.bundle().getFirst().amount()));
+        var extracted = extractExact(workflowId, input);
+        if (extracted == null) {
+            return Optional.empty();
+        }
+        storeAtSourceOrRecover(
+                workflowId, input.origin(), recoverySide(input.origin(), null), renamed);
+        changed.run();
+        return Optional.of(new FactoryResourceRef(input.origin(), renamed));
+    }
+
+    /** Immediately removes an exact item selection and emits it from a bus. */
+    public boolean drop(
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input) {
+        validateWorkflowOrigin(workflowId, input);
+        var target = busResolver.resolve(bus).orElse(null);
+        var stacks = itemStacks(input.bundle());
+        if (target == null || stacks == null) {
+            return false;
+        }
+        var extracted = extractExact(workflowId, input);
+        if (extracted == null) {
+            return false;
+        }
+        try {
+            if (!target.throwItems(stacks)) {
+                restoreSource(workflowId, input.origin(),
+                        recoverySide(input.origin(), bus), extracted);
+                return false;
+            }
+        } catch (RuntimeException exception) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            throw exception;
+        }
+        changed.run();
+        return true;
     }
 
     /** Current concrete contents of an external endpoint. */
@@ -97,6 +166,253 @@ public final class FactoryActionExecutor {
             escrow.remove(allocationId);
         }
         return result.completed();
+    }
+
+    /** Immediately attempts an empty-hand use on the bus target. */
+    public boolean use(FactoryBusAddress bus) {
+        var target = busResolver.resolve(bus).orElse(null);
+        return target != null && target.use();
+    }
+
+    /** Immediately attempts one item use and writes its remainder to the source. */
+    public boolean use(
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input) {
+        validateWorkflowOrigin(workflowId, input);
+        requireSingleItem(input, false);
+        var target = busResolver.resolve(bus).orElse(null);
+        if (target == null) {
+            return false;
+        }
+        var extracted = extractExact(workflowId, input);
+        if (extracted == null) {
+            return false;
+        }
+        var held = singleItem(extracted);
+        FactoryBusTarget.ItemUseResult result;
+        try {
+            result = target.useItem(held);
+        } catch (RuntimeException exception) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            throw exception;
+        }
+        if (!result.successful()) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            return false;
+        }
+        var remainder = itemResources(List.of(result.remainder()));
+        storeAtSourceOrRecover(workflowId, input.origin(),
+                recoverySide(input.origin(), bus), remainder);
+        changed.run();
+        return true;
+    }
+
+    /** Immediately attempts one block-item placement. */
+    public boolean place(
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input) {
+        validateWorkflowOrigin(workflowId, input);
+        requireSingleItem(input, true);
+        var target = busResolver.resolve(bus).orElse(null);
+        if (target == null) {
+            return false;
+        }
+        var extracted = extractExact(workflowId, input);
+        if (extracted == null) {
+            return false;
+        }
+        FactoryBusTarget.ItemUseResult result;
+        try {
+            result = target.placeAndCollect(singleItem(extracted));
+        } catch (RuntimeException exception) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            throw exception;
+        }
+        if (!result.successful()) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            return false;
+        }
+        var remainder = itemResources(List.of(result.remainder()));
+        storeAtSourceOrRecover(workflowId, input.origin(),
+                recoverySide(input.origin(), bus), remainder);
+        changed.run();
+        return true;
+    }
+
+    /** Immediately breaks one block and writes the damaged tool and drops to its source. */
+    public Optional<FactoryResourceRef> breakBlock(
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input) {
+        validateWorkflowOrigin(workflowId, input);
+        requireSingleItem(input, false);
+        var target = busResolver.resolve(bus).orElse(null);
+        if (target == null) {
+            return Optional.empty();
+        }
+        var extracted = extractExact(workflowId, input);
+        if (extracted == null) {
+            return Optional.empty();
+        }
+        FactoryBusTarget.BreakResult result;
+        try {
+            result = target.breakAndCollect(singleItem(extracted));
+        } catch (RuntimeException exception) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            throw exception;
+        }
+        if (!result.destroyed()) {
+            restoreSource(workflowId, input.origin(),
+                    recoverySide(input.origin(), bus), extracted);
+            return Optional.empty();
+        }
+        var drops = itemResources(result.drops());
+        var tool = itemResources(List.of(result.tool()));
+        var produced = new ArrayList<FactoryResource>(drops.size() + tool.size());
+        produced.addAll(drops);
+        produced.addAll(tool);
+        storeAtSourceOrRecover(workflowId, input.origin(),
+                recoverySide(input.origin(), bus), produced);
+        changed.run();
+        return Optional.of(new FactoryResourceRef(input.origin(), drops));
+    }
+
+    /** Extracts a complete interaction input or returns null without partial progress. */
+    private List<FactoryResource> extractExact(
+            UUID workflowId, FactoryResourceRef input) {
+        for (var resource : input.bundle()) {
+            var access = source(input.origin(), resource.key());
+            if (access == null
+                    || access.extract(resource.key(), resource.amount(), true) != resource.amount()) {
+                return null;
+            }
+        }
+        var extracted = new ArrayList<FactoryResource>();
+        for (var resource : input.bundle()) {
+            var access = source(input.origin(), resource.key());
+            var amount = access == null
+                    ? 0
+                    : access.extract(resource.key(), resource.amount(), false);
+            if (amount > 0) {
+                extracted.add(new FactoryResource(resource.key(), amount));
+            }
+            if (amount != resource.amount()) {
+                restoreSource(workflowId, input.origin(),
+                        recoverySide(input.origin(), null), extracted);
+                return null;
+            }
+        }
+        return List.copyOf(extracted);
+    }
+
+    private void storeAtSourceOrRecover(
+            UUID workflowId,
+            FactoryResourceOrigin origin,
+            Direction recoverySide,
+            List<FactoryResource> resources) {
+        var failed = new ArrayList<FactoryResource>();
+        for (var resource : resources) {
+            var target = source(origin, resource.key());
+            var stored = target == null
+                    ? 0
+                    : target.insert(resource.key(), resource.amount(), false);
+            if (stored < resource.amount()) {
+                failed.add(new FactoryResource(resource.key(), resource.amount() - stored));
+            }
+        }
+        if (!failed.isEmpty()) {
+            escrow.recover(workflowId, recoverySide, failed);
+            throw new IllegalStateException(
+                    "Source rejected an item transformation; result moved to recovery escrow");
+        }
+    }
+
+    private static void validateWorkflowOrigin(
+            UUID workflowId, FactoryResourceRef input) {
+        if (input != null
+                && input.origin().kind() == FactoryResourceOrigin.Kind.ESCROW
+                && !workflowId.equals(input.origin().escrowId())) {
+            throw new IllegalStateException("A workflow cannot use another workflow's escrow");
+        }
+    }
+
+    private Direction recoverySide(
+            FactoryResourceOrigin origin, FactoryBusAddress fallbackBus) {
+        if (origin != null) {
+            if (origin.kind() == FactoryResourceOrigin.Kind.ESCROW) {
+                var side = escrow.recoverySide(origin.escrowId());
+                if (side != null) {
+                    return side;
+                }
+            } else if (origin.endpoint().kind() == FactoryEndpoint.Kind.NETWORK) {
+                return origin.endpoint().networkSide();
+            } else {
+                return busRecoverySide.apply(origin.endpoint().bus());
+            }
+        }
+        return fallbackBus == null ? Direction.NORTH : busRecoverySide.apply(fallbackBus);
+    }
+
+    private static ItemStack singleItem(List<FactoryResource> resources) {
+        var stacks = itemStacks(resources);
+        if (stacks == null || stacks.size() != 1 || stacks.getFirst().getCount() != 1) {
+            throw new IllegalStateException("Interaction requires exactly one item");
+        }
+        return stacks.getFirst();
+    }
+
+    private static void requireSingleItem(
+            FactoryResourceRef input, boolean requireBlockItem) {
+        if (input.bundle().size() != 1
+                || input.bundle().getFirst().amount() != 1
+                || !(input.bundle().getFirst().key() instanceof AEItemKey itemKey)) {
+            throw new IllegalArgumentException("Interaction requires exactly one item resource");
+        }
+        if (requireBlockItem && !(itemKey.getItem() instanceof BlockItem)) {
+            throw new IllegalArgumentException("Placement requires a block item");
+        }
+    }
+
+    private static List<ItemStack> itemStacks(List<FactoryResource> resources) {
+        var result = new ArrayList<ItemStack>();
+        for (var resource : resources) {
+            if (!(resource.key() instanceof AEItemKey itemKey)) {
+                return null;
+            }
+            var remaining = resource.amount();
+            while (remaining > 0) {
+                var amount = (int) Math.min(remaining, itemKey.getMaxStackSize());
+                result.add(itemKey.toStack(amount));
+                remaining -= amount;
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static List<FactoryResource> itemResources(List<ItemStack> stacks) {
+        var amounts = new LinkedHashMap<AEKey, Long>();
+        for (var stack : stacks) {
+            if (!stack.isEmpty()) {
+                amounts.merge(AEItemKey.of(stack), (long) stack.getCount(), Math::addExact);
+            }
+        }
+        return amounts.entrySet().stream()
+                .map(entry -> new FactoryResource(entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
+    /** Parses either a JSON text component or a plain literal display name. */
+    private static Component parseName(String name, HolderLookup.Provider registries) {
+        try {
+            var component = Component.Serializer.fromJson(name, registries);
+            if (component != null) {
+                return component;
+            }
+        } catch (JsonParseException | IllegalArgumentException ignored) {
+            // A non-JSON string is intentionally treated as a literal name.
+        }
+        return Component.literal(name);
     }
 
     private FactoryTransferResult exact(UUID workflowId, FactoryTransferAction action) {
@@ -204,9 +520,17 @@ public final class FactoryActionExecutor {
             UUID workflowId,
             FactoryTransferAction action,
             List<FactoryResource> resources) {
+        restoreSource(workflowId, action.source(), recoverySide(action), resources);
+    }
+
+    private void restoreSource(
+            UUID workflowId,
+            FactoryResourceOrigin origin,
+            Direction recoverySide,
+            List<FactoryResource> resources) {
         var failed = new ArrayList<FactoryResource>();
         for (var resource : resources) {
-            var source = source(action.source(), resource.key());
+            var source = source(origin, resource.key());
             var restored = source == null
                     ? 0
                     : source.insert(resource.key(), resource.amount(), false);
@@ -215,7 +539,7 @@ public final class FactoryActionExecutor {
             }
         }
         if (!failed.isEmpty()) {
-            escrow.recover(workflowId, recoverySide(action), failed);
+            escrow.recover(workflowId, recoverySide, failed);
             throw new IllegalStateException(
                     "Source rejected rollback; resources moved to recovery escrow");
         }
@@ -247,10 +571,14 @@ public final class FactoryActionExecutor {
                 && action.source().endpoint().kind() == FactoryEndpoint.Kind.NETWORK) {
             return action.source().endpoint().networkSide();
         }
+        if (action.source().endpoint() != null
+                && action.source().endpoint().kind() == FactoryEndpoint.Kind.BUS) {
+            return busRecoverySide.apply(action.source().endpoint().bus());
+        }
         if (action.target().kind() == FactoryEndpoint.Kind.NETWORK) {
             return action.target().networkSide();
         }
-        return Direction.NORTH;
+        return busRecoverySide.apply(action.target().bus());
     }
 
     private StorageAccess source(FactoryResourceOrigin origin, AEKey key) {

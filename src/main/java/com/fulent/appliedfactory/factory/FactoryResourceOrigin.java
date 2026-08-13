@@ -5,7 +5,7 @@ import java.util.UUID;
 
 import org.jetbrains.annotations.Nullable;
 
-/** Source of a resource selection: either an external endpoint or one order's private escrow. */
+/** Source of a resource selection: an external endpoint or one workflow's private escrow. */
 public record FactoryResourceOrigin(
         Kind kind,
         @Nullable FactoryEndpoint endpoint,

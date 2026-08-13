@@ -80,7 +80,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private static final String ERROR_SUBSCRIBER_ID_NBT_KEY = "Id";
     private final FactoryEscrow escrow = new FactoryEscrow(this::setChanged);
     private final FactoryActionExecutor actionExecutor = new FactoryActionExecutor(
-            escrow, this::resolveBusTarget, this::getNetworkStorage, this::setChanged);
+            escrow, this::resolveBusTarget, this::getNetworkStorage,
+            this::recoverySideForBus, this::setChanged);
     private final Map<Direction, NetworkAttachment> networkAttachments =
             new EnumMap<>(Direction.class);
     private final Map<Direction, IManagedGridNode> networkNodes =
@@ -401,6 +402,51 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public Optional<com.fulent.appliedfactory.factory.FactoryResourceRef> renameItem(
+            UUID workflowId,
+            com.fulent.appliedfactory.factory.FactoryResourceRef item,
+            String name) {
+        return actionExecutor.rename(workflowId, item, name, registries());
+    }
+
+    @Override
+    public boolean dropItem(
+            UUID workflowId,
+            FactoryBusAddress bus,
+            com.fulent.appliedfactory.factory.FactoryResourceRef item) {
+        return actionExecutor.drop(workflowId, bus, item);
+    }
+
+    @Override
+    public boolean use(UUID workflowId, FactoryBusAddress bus) {
+        return actionExecutor.use(bus);
+    }
+
+    @Override
+    public boolean use(
+            UUID workflowId,
+            FactoryBusAddress bus,
+            com.fulent.appliedfactory.factory.FactoryResourceRef item) {
+        return actionExecutor.use(workflowId, bus, item);
+    }
+
+    @Override
+    public boolean place(
+            UUID workflowId,
+            FactoryBusAddress bus,
+            com.fulent.appliedfactory.factory.FactoryResourceRef block) {
+        return actionExecutor.place(workflowId, bus, block);
+    }
+
+    @Override
+    public Optional<com.fulent.appliedfactory.factory.FactoryResourceRef> breakBlock(
+            UUID workflowId,
+            FactoryBusAddress bus,
+            com.fulent.appliedfactory.factory.FactoryResourceRef tool) {
+        return actionExecutor.breakBlock(workflowId, bus, tool);
+    }
+
+    @Override
     public boolean createEscrow(
             UUID workflowId,
             Direction recoverySide,
@@ -512,6 +558,16 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private Optional<com.fulent.appliedfactory.factory.FactoryBusTarget> resolveBusTarget(
             com.fulent.appliedfactory.factory.FactoryBusAddress address) {
         return resolveBus(address).flatMap(FactoryBusPart::target);
+    }
+
+    private Direction recoverySideForBus(FactoryBusAddress address) {
+        var addresses = busAddressesByNetwork();
+        for (var side : Direction.values()) {
+            if (addresses.getOrDefault(side, List.of()).contains(address)) {
+                return side;
+            }
+        }
+        return Direction.NORTH;
     }
 
     private Optional<FactoryActionExecutor.NetworkEndpoint> getNetworkStorage(Direction side) {

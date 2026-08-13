@@ -26,6 +26,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.GameMasterBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -152,6 +153,55 @@ public final class FactoryBusTarget {
                     player, level, ItemStack.EMPTY, InteractionHand.MAIN_HAND, interactionHit())
                     .consumesAction();
         } finally {
+            player.closeContainer();
+            player.setItemInHand(InteractionHand.MAIN_HAND, previous);
+        }
+    }
+
+    /** Uses one supplied item on the target, falling back to its in-air use. */
+    public ItemUseResult useItem(ItemStack stack) {
+        if (!isLoaded() || stack.isEmpty()) {
+            return ItemUseResult.failed();
+        }
+        var player = interactionPlayer();
+        if (player == null) {
+            return ItemUseResult.failed();
+        }
+        var previous = player.getItemInHand(InteractionHand.MAIN_HAND);
+        var held = stack.copyWithCount(1);
+        player.setItemInHand(InteractionHand.MAIN_HAND, held);
+        try {
+            var result = player.gameMode.useItemOn(
+                    player, level, held, InteractionHand.MAIN_HAND, interactionHit());
+            if (!result.consumesAction()) {
+                result = player.gameMode.useItem(
+                        player, level, player.getItemInHand(InteractionHand.MAIN_HAND),
+                        InteractionHand.MAIN_HAND);
+            }
+            if (result.consumesAction() && player.isUsingItem()) {
+                var hand = player.getUsedItemHand();
+                var using = player.getUseItem();
+                if (using.useOnRelease()) {
+                    player.releaseUsingItem();
+                } else {
+                    var original = using.copy();
+                    var finished = net.neoforged.neoforge.event.EventHooks.onItemUseFinish(
+                            player,
+                            original,
+                            player.getUseItemRemainingTicks(),
+                            using.finishUsingItem(level, player));
+                    player.setItemInHand(hand, finished);
+                    player.stopUsingItem();
+                }
+            }
+            return new ItemUseResult(
+                    result.consumesAction(),
+                    result.consumesAction()
+                            ? player.getItemInHand(InteractionHand.MAIN_HAND).copy()
+                            : stack.copyWithCount(1));
+        } finally {
+            player.stopUsingItem();
+            player.closeContainer();
             player.setItemInHand(InteractionHand.MAIN_HAND, previous);
         }
     }
@@ -161,21 +211,32 @@ public final class FactoryBusTarget {
      * player.
      */
     public boolean place(ItemStack stack) {
+        return placeAndCollect(stack).successful();
+    }
+
+    /** Places one block item and returns the possibly transformed held-item remainder. */
+    public ItemUseResult placeAndCollect(ItemStack stack) {
         if (!isLoaded() || !blockState().isAir() || !(stack.getItem() instanceof BlockItem)) {
-            return false;
+            return ItemUseResult.failed();
         }
         var player = interactionPlayer();
         if (player == null) {
-            return false;
+            return ItemUseResult.failed();
         }
         var previous = player.getItemInHand(InteractionHand.MAIN_HAND);
         var placed = stack.copyWithCount(1);
         player.setItemInHand(InteractionHand.MAIN_HAND, placed);
         try {
-            return player.gameMode.useItemOn(
+            var result = player.gameMode.useItemOn(
                     player, level, placed, InteractionHand.MAIN_HAND, interactionHit())
                     .consumesAction() && !blockState().isAir();
+            return new ItemUseResult(
+                    result,
+                    result
+                            ? player.getItemInHand(InteractionHand.MAIN_HAND).copy()
+                            : stack.copyWithCount(1));
         } finally {
+            player.closeContainer();
             player.setItemInHand(InteractionHand.MAIN_HAND, previous);
         }
     }
@@ -238,30 +299,54 @@ public final class FactoryBusTarget {
         player.setItemInHand(InteractionHand.MAIN_HAND, usedTool);
         try {
             var state = blockState();
+            if (state.getBlock() instanceof GameMasterBlock
+                    && !player.canUseGameMasterBlocks()) {
+                return BreakResult.failed();
+            }
+            if (player.blockActionRestricted(serverLevel, position, GameType.SURVIVAL)) {
+                return BreakResult.failed();
+            }
             if (CommonHooks.fireBlockBreak(serverLevel, GameType.SURVIVAL, player, position, state)
                     .isCanceled()) {
                 return BreakResult.failed();
             }
-            var drops = dropsFor(state, player, usedTool);
-            if (!serverLevel.destroyBlock(position, false, player)) {
+            var blockEntity = level.getBlockEntity(position);
+            var originalTool = usedTool.copy();
+            var destroyedState = state.getBlock().playerWillDestroy(
+                    serverLevel, position, state, player);
+            var canHarvest = destroyedState.canHarvestBlock(serverLevel, position, player);
+            var drops = canHarvest
+                    ? dropsFor(destroyedState, player, originalTool, blockEntity)
+                    : List.<ItemStack>of();
+            usedTool.mineBlock(serverLevel, destroyedState, position, player);
+            var removed = destroyedState.onDestroyedByPlayer(
+                    serverLevel, position, player, canHarvest,
+                    serverLevel.getFluidState(position));
+            if (!removed) {
                 return BreakResult.failed();
             }
-            return new BreakResult(true, drops);
+            destroyedState.getBlock().destroy(serverLevel, position, destroyedState);
+            if (usedTool.isEmpty() && !originalTool.isEmpty()) {
+                net.neoforged.neoforge.event.EventHooks.onPlayerDestroyItem(
+                        player, originalTool, InteractionHand.MAIN_HAND);
+            }
+            return new BreakResult(true, drops, usedTool.copy());
         } finally {
             player.setItemInHand(InteractionHand.MAIN_HAND, previousTool);
         }
     }
 
-    /** Spawns detached item entities from the bus's target face. */
+    /** Spawns detached item entities outward from the bus through its target position. */
     public boolean throwItems(List<ItemStack> stacks) {
-        if (!(level instanceof ServerLevel serverLevel) || stacks.isEmpty()) {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded() || stacks.isEmpty()) {
             return false;
         }
-        var launchDirection = targetFace();
+        var launchDirection = accessDirection();
         var spawn = Vec3.atCenterOf(position).add(
                 launchDirection.getStepX() * 0.35D,
                 launchDirection.getStepY() * 0.35D,
                 launchDirection.getStepZ() * 0.35D);
+        var spawned = new java.util.ArrayList<ItemEntity>();
         for (var stack : stacks) {
             if (stack.isEmpty()) {
                 continue;
@@ -272,7 +357,11 @@ public final class FactoryBusTarget {
                     launchDirection.getStepX() * 0.18D,
                     launchDirection.getStepY() * 0.18D + 0.08D,
                     launchDirection.getStepZ() * 0.18D);
-            serverLevel.addFreshEntity(item);
+            if (!serverLevel.addFreshEntity(item)) {
+                spawned.forEach(ItemEntity::discard);
+                return false;
+            }
+            spawned.add(item);
         }
         return true;
     }
@@ -345,7 +434,14 @@ public final class FactoryBusTarget {
     }
 
     private List<ItemStack> dropsFor(BlockState state, FakePlayer player, ItemStack tool) {
-        BlockEntity blockEntity = level.getBlockEntity(position);
+        return dropsFor(state, player, tool, level.getBlockEntity(position));
+    }
+
+    private List<ItemStack> dropsFor(
+            BlockState state,
+            FakePlayer player,
+            ItemStack tool,
+            @Nullable BlockEntity blockEntity) {
         return List.copyOf(Block.getDrops(state, (ServerLevel) level, position, blockEntity,
                 player, tool));
     }
@@ -354,13 +450,24 @@ public final class FactoryBusTarget {
         return new ItemStack(MINING_TOOL);
     }
 
-    public record BreakResult(boolean destroyed, List<ItemStack> drops) {
+    public record ItemUseResult(boolean successful, ItemStack remainder) {
+        public ItemUseResult {
+            remainder = remainder.copy();
+        }
+
+        private static ItemUseResult failed() {
+            return new ItemUseResult(false, ItemStack.EMPTY);
+        }
+    }
+
+    public record BreakResult(boolean destroyed, List<ItemStack> drops, ItemStack tool) {
         public BreakResult {
             drops = List.copyOf(drops);
+            tool = tool.copy();
         }
 
         private static BreakResult failed() {
-            return new BreakResult(false, List.of());
+            return new BreakResult(false, List.of(), ItemStack.EMPTY);
         }
     }
 }

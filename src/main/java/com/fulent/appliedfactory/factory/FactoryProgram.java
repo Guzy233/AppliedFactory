@@ -41,6 +41,23 @@ public final class FactoryProgram {
 
         FactoryTransferResult performTransfer(UUID workflowId, FactoryTransferAction action);
 
+        Optional<FactoryResourceRef> renameItem(
+                UUID workflowId, FactoryResourceRef item, String name);
+
+        boolean dropItem(
+                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item);
+
+        boolean use(UUID workflowId, FactoryBusAddress bus);
+
+        boolean use(
+                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item);
+
+        boolean place(
+                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef block);
+
+        Optional<FactoryResourceRef> breakBlock(
+                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef tool);
+
         boolean createEscrow(
                 UUID workflowId,
                 Direction recoverySide,
@@ -227,6 +244,7 @@ public final class FactoryProgram {
             } catch (RuntimeException exception) {
                 finish(job, messageOf(exception));
             }
+            return;
         }
     }
 

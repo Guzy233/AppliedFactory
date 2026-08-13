@@ -16,7 +16,7 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 
 /**
- * Controller-internal authoritative storage for AE processing inputs and rollback recovery.
+ * Controller-internal storage for processing inputs and rollback/rejected-transformation recovery.
  * Allocations are isolated by workflow id and are never mounted as AE storage.
  */
 public final class FactoryEscrow {

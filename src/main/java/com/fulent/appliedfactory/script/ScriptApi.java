@@ -22,15 +22,14 @@ import com.fulent.appliedfactory.factory.FactoryResourceRef;
 import com.fulent.appliedfactory.factory.FactorySleepAction;
 import com.fulent.appliedfactory.factory.FactoryTransferAction;
 
-import com.mojang.brigadier.exceptions.CommandSyntaxException;
-
 import appeng.api.crafting.PatternDetailsHelper;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKeyType;
 import appeng.api.stacks.AEKeyTypes;
 import appeng.api.stacks.GenericStack;
 import net.minecraft.core.Direction;
-import net.minecraft.nbt.TagParser;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -70,6 +69,9 @@ final class ScriptApi {
     }
 
     Object wrap(Object value) {
+        if (value instanceof FactoryResourceRef resource) {
+            return binder.wrap(resourceArray(resource.origin(), resource.bundle()));
+        }
         return binder.wrap(value);
     }
 
@@ -102,7 +104,7 @@ final class ScriptApi {
         }
     }
 
-    Object performNow(FactoryTransferAction action) {
+    Object performNow(FactoryTransferAction action, boolean arrayResult) {
         if (activeContext == null) {
             throw Context.reportRuntimeError("Action.now() may only run inside a workflow");
         }
@@ -110,31 +112,34 @@ final class ScriptApi {
         if (action.mode() == FactoryTransferAction.Mode.EXACT) {
             return result.completed();
         }
-        return new JsResource(this, new FactoryResourceRef(action.source(), result.remaining()));
+        return result.remaining().isEmpty()
+                ? null
+                : arrayResult
+                        ? resourceArray(action.source(), result.remaining())
+                        : resourceValue(new FactoryResourceRef(
+                                action.source(), result.remaining()));
     }
 
-    JsResource resource(FactoryEndpoint endpoint, Object rawSpec) {
+    Object resource(FactoryEndpoint endpoint, Object rawSpec) {
         var origin = FactoryResourceOrigin.endpoint(endpoint);
         if (rawSpec == Undefined.instance || rawSpec == null) {
-            return new JsResource(this,
-                    new FactoryResourceRef(origin, host.availableResources(endpoint)));
+            return resourceArray(origin, host.availableResources(endpoint));
         }
         var spec = binder.unwrap(rawSpec, JsResourceSpec.class, "resource spec");
         var amount = spec.amount();
         if (amount == -1) {
             amount = host.availableAmount(origin, spec.key());
         }
-        var bundle = amount <= 0
-                ? List.<FactoryResource>of()
-                : List.of(new FactoryResource(spec.key(), amount));
-        return new JsResource(this, new FactoryResourceRef(origin, bundle));
+        return amount <= 0
+                ? null
+                : resourceValue(new FactoryResourceRef(
+                        origin, List.of(new FactoryResource(spec.key(), amount))));
     }
 
     JsOrder order(ScriptExecutionContext context) {
-        var input = new FactoryResourceRef(
-                FactoryResourceOrigin.escrow(context.workflowId()), context.inputs());
+        var origin = FactoryResourceOrigin.escrow(context.workflowId());
         return new JsOrder(
-                new JsResource(this, input),
+                resourceArray(origin, context.inputs()),
                 new JsNetwork(this, context.orderNetwork()));
     }
 
@@ -147,6 +152,148 @@ final class ScriptApi {
             return FactoryEndpoint.bus(bus.address());
         }
         throw Context.reportRuntimeError("target must be a Network or Bus");
+    }
+
+    FactoryResourceRef requireResource(Object value) {
+        var delegate = binder.delegate(value);
+        var resource = delegate instanceof JsResource handle ? handle.resource() : null;
+        if (resource == null) {
+            throw Context.reportRuntimeError("resource must be a factory Resource handle");
+        }
+        return requireResource(resource);
+    }
+
+    FactoryResourceRef requireResource(FactoryResourceRef resource) {
+        if (resource.origin().kind() == FactoryResourceOrigin.Kind.ESCROW
+                && (activeContext == null
+                        || !resource.origin().escrowId().equals(activeContext.workflowId()))) {
+            throw Context.reportRuntimeError(
+                    "An escrow Resource can only be used by the workflow that owns it");
+        }
+        return resource;
+    }
+
+    FactoryResourceRef requireItemResource(Object value) {
+        var resource = requireResource(value);
+        if (resource.bundle().size() != 1
+                || !(resource.bundle().getFirst().key() instanceof AEItemKey)) {
+            throw Context.reportRuntimeError("operation requires an ae2:i resource");
+        }
+        return resource;
+    }
+
+    JsResource resourceFacade(FactoryResourceRef resource) {
+        if (resource.bundle().size() != 1) {
+            throw new IllegalArgumentException("A script Resource must contain one exact AE key");
+        }
+        return new JsResource(this, resource);
+    }
+
+    Object resourceValue(FactoryResourceRef resource) {
+        return resource.bundle().size() == 1
+                ? resourceFacade(resource)
+                : resourceArray(resource.origin(), resource.bundle());
+    }
+
+    Object resourceArray(
+            FactoryResourceOrigin origin, List<FactoryResource> resources) {
+        var normalized = FactoryResourceRef.normalize(resources);
+        var values = normalized.stream()
+                .map(resource -> binder.wrap(resourceFacade(new FactoryResourceRef(
+                        origin, List.of(resource)))))
+                .toArray();
+        var array = (ScriptableObject) Context.getCurrentContext().newArray(scope, values);
+        var methods = (Scriptable) binder.wrap(new JsResourceArray(
+                this, new FactoryResourceRef(origin, normalized)));
+        for (var name : List.of("to", "pushExactlyInto")) {
+            array.defineProperty(
+                    name,
+                    ScriptableObject.getProperty(methods, name),
+                    ScriptableObject.READONLY
+                            | ScriptableObject.PERMANENT
+                            | ScriptableObject.DONTENUM);
+        }
+        array.sealObject();
+        return array;
+    }
+
+    JsTransferAction transfer(
+            FactoryResourceRef resource,
+            Object target,
+            FactoryTransferAction.Mode mode,
+            boolean arrayResult) {
+        var usable = requireResource(resource);
+        return new JsTransferAction(
+                this,
+                new FactoryTransferAction(
+                        usable.origin(), requireEndpoint(target), usable.bundle(), mode),
+                arrayResult);
+    }
+
+    Object renameItem(Object item, String name) {
+        requireActiveContext("rename(item, name)");
+        return host.renameItem(activeContext.workflowId(), requireItemResource(item), name)
+                .map(this::resourceValue)
+                .orElse(null);
+    }
+
+    Object itemNbt(Object item) {
+        var resource = requireItemResource(item);
+        var key = (AEItemKey) resource.bundle().getFirst().key();
+        return NbtJs.toJs(
+                Context.getCurrentContext(), scope,
+                key.toStack(1).save(host.registries()));
+    }
+
+    boolean dropItem(com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item) {
+        requireActiveContext("bus.drop(item)");
+        return host.dropItem(activeContext.workflowId(), bus, requireItemResource(item));
+    }
+
+    boolean useItem(
+            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item) {
+        requireActiveContext("bus.use(item)");
+        if (item == Undefined.instance || item == null) {
+            return host.use(activeContext.workflowId(), bus);
+        }
+        return host.use(
+                activeContext.workflowId(), bus, requireItemResource(item));
+    }
+
+    boolean placeItem(
+            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item) {
+        requireActiveContext("bus.place(item)");
+        return host.place(
+                activeContext.workflowId(), bus, requireItemResource(item));
+    }
+
+    Object breakBlock(
+            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object tool) {
+        requireActiveContext("bus.breakBlock(tool)");
+        return host.breakBlock(
+                        activeContext.workflowId(), bus, requireItemResource(tool))
+                .map(result -> resourceArray(result.origin(), result.bundle()))
+                .orElse(null);
+    }
+
+    private void requireActiveContext(String operation) {
+        if (activeContext == null) {
+            throw Context.reportRuntimeError(operation + " may only run inside a workflow");
+        }
+    }
+
+    static String channel(AEKey key) {
+        return key.getType().getId().toString();
+    }
+
+    CompoundTag optionalNbt(Object value, String name) {
+        if (value == Undefined.instance || value == null) {
+            return null;
+        }
+        if (!(value instanceof Scriptable object)) {
+            throw Context.reportRuntimeError(name + " must be an NBT object");
+        }
+        return NbtJs.fromObject(Context.getCurrentContext(), object, name);
     }
 
     static Direction direction(String value) {
@@ -215,36 +362,46 @@ final class JsGlobals {
         return Undefined.instance;
     }
 
-    public JsResourceSpec item(String id, long amount) {
-        return spec(AEKeyType.items(), id, amount);
+    public Object rename(Object item, String name) {
+        return api.renameItem(item, name);
     }
 
-    public JsResourceSpec stack(String channel, String id, long amount) {
-        return spec(resolveChannel(channel), id, amount);
+    public Object itemNbt(Object item) {
+        return api.itemNbt(item);
     }
 
-    public JsResourceSpec stackTag(String serializedKey, long amount) {
-        requireAmount(amount);
-        try {
-            var key = AEKey.fromTagGeneric(api.host().registries(),
-                    TagParser.parseTag(serializedKey));
-            if (key == null) {
-                throw Context.reportRuntimeError("stackTag contains an invalid AE key");
-            }
-            return new JsResourceSpec(key, amount);
-        } catch (CommandSyntaxException exception) {
-            throw Context.reportRuntimeError("stackTag requires valid SNBT");
+    public JsResourceSpec item(String id, long amount, Object components) {
+        var resourceId = ResourceLocation.tryParse(id);
+        if (resourceId == null) {
+            throw Context.reportRuntimeError("Invalid item id: " + id);
         }
+        var key = new CompoundTag();
+        key.putString("id", resourceId.toString());
+        var componentPatch = api.optionalNbt(components, "components");
+        if (componentPatch != null) {
+            key.put("components", componentPatch);
+        }
+        return spec(AEKeyType.items(), key, amount);
     }
 
-    private JsResourceSpec spec(AEKeyType channel, String id, long amount) {
-        requireAmount(amount);
-        try {
-            return new JsResourceSpec(
-                    KeySpecRegistry.parse(api.host().registries(), channel, id, null), amount);
-        } catch (IllegalArgumentException exception) {
-            throw Context.reportRuntimeError(exception.getMessage());
+    public JsResourceSpec stack(String channel, Object rawKey, long amount) {
+        if (!(rawKey instanceof Scriptable keyObject)) {
+            throw Context.reportRuntimeError("stack key must be an NBT object");
         }
+        return spec(
+                resolveChannel(channel),
+                NbtJs.fromObject(Context.getCurrentContext(), keyObject, "key"),
+                amount);
+    }
+
+    private JsResourceSpec spec(AEKeyType channel, CompoundTag keyTag, long amount) {
+        requireAmount(amount);
+        var key = channel.loadKeyFromTag(api.host().registries(), keyTag);
+        if (key == null) {
+            throw Context.reportRuntimeError(
+                    "Invalid key for AE resource channel " + channel.getId());
+        }
+        return new JsResourceSpec(api, key, amount);
     }
 
     private List<FactoryResource> specs(Object value, String name) {
@@ -269,18 +426,15 @@ final class JsGlobals {
     }
 
     private static AEKeyType resolveChannel(String value) {
-        return switch (value) {
-            case "item" -> AEKeyType.items();
-            case "fluid" -> AEKeyType.fluids();
-            default -> {
-                var id = ResourceLocation.tryParse(value);
-                var type = id == null ? null : AEKeyTypes.get(id);
-                if (type == null) {
-                    throw Context.reportRuntimeError("Unknown AE resource channel: " + value);
-                }
-                yield type;
-            }
-        };
+        var id = ResourceLocation.tryParse(value);
+        if (id == null) {
+            throw Context.reportRuntimeError("Invalid AE resource channel id: " + value);
+        }
+        try {
+            return AEKeyTypes.get(id);
+        } catch (IllegalArgumentException exception) {
+            throw Context.reportRuntimeError("Unknown AE resource channel: " + value);
+        }
     }
 
     private static void requireAmount(long amount) {
@@ -292,10 +446,12 @@ final class JsGlobals {
 
 @JsBridge
 final class JsResourceSpec {
+    private final ScriptApi api;
     private final AEKey key;
     private final long amount;
 
-    JsResourceSpec(AEKey key, long amount) {
+    JsResourceSpec(ScriptApi api, AEKey key, long amount) {
+        this.api = api;
         this.key = key;
         this.amount = amount;
     }
@@ -309,8 +465,15 @@ final class JsResourceSpec {
     }
 
     @JsProperty
-    public String getId() {
-        return key.getId().toString();
+    public String getChannel() {
+        return ScriptApi.channel(key);
+    }
+
+    @JsProperty
+    public Object getKey() {
+        return NbtJs.toJs(
+                Context.getCurrentContext(), api.scope(),
+                key.toTag(api.host().registries()));
     }
 
     @JsProperty
@@ -355,7 +518,7 @@ final class JsNetwork {
         return Undefined.instance;
     }
 
-    public JsResource extract(Object spec) {
+    public Object extract(Object spec) {
         return api.resource(FactoryEndpoint.network(side), spec);
     }
 }
@@ -392,14 +555,17 @@ final class JsBus {
         var position = address.hostPosition().relative(address.side());
         if (target == null || !target.isLoaded()) {
             return new JsBlockView(
-                    "minecraft:air", "minecraft:air",
-                    position.getX(), position.getY(), position.getZ(), Map.of());
+                    api, "minecraft:air", "minecraft:air",
+                    position.getX(), position.getY(), position.getZ(), Map.of(), null, null);
         }
         var state = target.blockState();
+        var blockEntityType = target.blockEntityTypeId();
         return new JsBlockView(
-                target.blockId().toString(), state.toString(),
+                api, target.blockId().toString(), state.toString(),
                 position.getX(), position.getY(), position.getZ(),
-                blockStateProperties(state));
+                blockStateProperties(state),
+                blockEntityType == null ? null : blockEntityType.toString(),
+                target.blockEntityNbt());
     }
 
     private static Map<String, Object> blockStateProperties(BlockState state) {
@@ -419,33 +585,58 @@ final class JsBus {
         return value.toString();
     }
 
-    public JsResource extract(Object spec) {
+    public Object extract(Object spec) {
         return api.resource(FactoryEndpoint.bus(address), spec);
+    }
+
+    public boolean drop(Object item) {
+        return api.dropItem(address, item);
+    }
+
+    public boolean use(Object resource) {
+        return api.useItem(address, resource);
+    }
+
+    public boolean place(Object resource) {
+        return api.placeItem(address, resource);
+    }
+
+    public Object breakBlock(Object tool) {
+        return api.breakBlock(address, tool);
     }
 }
 
 @JsBridge
 final class JsBlockView {
+    private final ScriptApi api;
     private final String id;
     private final String state;
     private final int x;
     private final int y;
     private final int z;
     private final Map<String, Object> properties;
+    private final String blockEntityType;
+    private final CompoundTag nbt;
 
     JsBlockView(
+            ScriptApi api,
             String id,
             String state,
             int x,
             int y,
             int z,
-            Map<String, Object> properties) {
+            Map<String, Object> properties,
+            String blockEntityType,
+            CompoundTag nbt) {
+        this.api = api;
         this.id = id;
         this.state = state;
         this.x = x;
         this.y = y;
         this.z = z;
         this.properties = Map.copyOf(properties);
+        this.blockEntityType = blockEntityType;
+        this.nbt = nbt == null ? null : nbt.copy();
     }
 
     @JsProperty
@@ -478,6 +669,18 @@ final class JsBlockView {
         return properties;
     }
 
+    @JsProperty
+    public String getBlockEntityType() {
+        return blockEntityType;
+    }
+
+    @JsProperty
+    public Object getNbt() {
+        return nbt == null
+                ? null
+                : NbtJs.toJs(Context.getCurrentContext(), api.scope(), nbt);
+    }
+
     public boolean isSameBlock(JsBlockView other) {
         return x == other.x && y == other.y && z == other.z;
     }
@@ -493,31 +696,62 @@ final class JsResource {
         this.resource = resource;
     }
 
+    FactoryResourceRef resource() {
+        return resource;
+    }
+
     @JsProperty
     public JsResourceOrigin getOrigin() {
         return new JsResourceOrigin(api, resource.origin());
     }
 
     @JsProperty
-    public boolean isEmpty() {
-        return resource.isEmpty();
+    public String getChannel() {
+        return ScriptApi.channel(resource.bundle().getFirst().key());
     }
 
     @JsProperty
-    public List<JsResourceAmount> getBundle() {
-        return resource.bundle().stream().map(JsResourceAmount::new).toList();
+    public String getId() {
+        return resource.bundle().getFirst().id().toString();
+    }
+
+    @JsProperty
+    public double getAmount() {
+        return resource.bundle().getFirst().amount();
+    }
+
+    @JsProperty
+    public Object getKey() {
+        return NbtJs.toJs(
+                Context.getCurrentContext(), api.scope(),
+                resource.bundle().getFirst().key().toTag(api.host().registries()));
     }
 
     public JsTransferAction to(Object target) {
-        return new JsTransferAction(api, new FactoryTransferAction(
-                resource.origin(), api.requireEndpoint(target), resource.bundle(),
-                FactoryTransferAction.Mode.PARTIAL));
+        return api.transfer(resource, target, FactoryTransferAction.Mode.PARTIAL, false);
     }
 
     public JsTransferAction pushExactlyInto(Object target) {
-        return new JsTransferAction(api, new FactoryTransferAction(
-                resource.origin(), api.requireEndpoint(target), resource.bundle(),
-                FactoryTransferAction.Mode.EXACT));
+        return api.transfer(resource, target, FactoryTransferAction.Mode.EXACT, false);
+    }
+}
+
+@JsBridge
+final class JsResourceArray {
+    private final ScriptApi api;
+    private final FactoryResourceRef resources;
+
+    JsResourceArray(ScriptApi api, FactoryResourceRef resources) {
+        this.api = api;
+        this.resources = resources;
+    }
+
+    public JsTransferAction to(Object target) {
+        return api.transfer(resources, target, FactoryTransferAction.Mode.PARTIAL, true);
+    }
+
+    public JsTransferAction pushExactlyInto(Object target) {
+        return api.transfer(resources, target, FactoryTransferAction.Mode.EXACT, true);
     }
 }
 
@@ -534,7 +768,7 @@ final class JsResourceOrigin {
     @JsProperty
     public String getKind() {
         if (origin.kind() == FactoryResourceOrigin.Kind.ESCROW) {
-            return "order";
+            return "escrow";
         }
         return origin.endpoint().kind() == FactoryEndpoint.Kind.NETWORK
                 ? "network"
@@ -554,32 +788,16 @@ final class JsResourceOrigin {
 }
 
 @JsBridge
-final class JsResourceAmount {
-    private final FactoryResource resource;
-
-    JsResourceAmount(FactoryResource resource) {
-        this.resource = resource;
-    }
-
-    @JsProperty
-    public String getId() {
-        return resource.id().toString();
-    }
-
-    @JsProperty
-    public double getAmount() {
-        return resource.amount();
-    }
-}
-
-@JsBridge
 final class JsTransferAction {
     private final ScriptApi api;
     private final FactoryTransferAction action;
+    private final boolean arrayResult;
 
-    JsTransferAction(ScriptApi api, FactoryTransferAction action) {
+    JsTransferAction(
+            ScriptApi api, FactoryTransferAction action, boolean arrayResult) {
         this.api = api;
         this.action = action;
+        this.arrayResult = arrayResult;
     }
 
     FactoryAction action() {
@@ -587,7 +805,7 @@ final class JsTransferAction {
     }
 
     public Object now() {
-        return api.performNow(action);
+        return api.performNow(action, arrayResult);
     }
 }
 
@@ -606,16 +824,16 @@ final class JsSleepAction {
 
 @JsBridge
 final class JsOrder {
-    private final JsResource input;
+    private final Object input;
     private final JsNetwork network;
 
-    JsOrder(JsResource input, JsNetwork network) {
+    JsOrder(Object input, JsNetwork network) {
         this.input = input;
         this.network = network;
     }
 
     @JsProperty
-    public JsResource getInput() {
+    public Object getInput() {
         return input;
     }
 
