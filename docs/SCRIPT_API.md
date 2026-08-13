@@ -207,7 +207,7 @@ NBT 只读值会转换为 JavaScript 对象、数组、字符串和数字。超�
 
 ## 8. 改名与总线世界交互
 
-`rename(resource, name)`、`bus.drop(resource)`、`use()`、`place()` 和 `breakBlock()` 都是 workflow 内的一次性同步操作，不进入调度器，也不应 `yield`。每次调用只尝试一次；目标不可用或来源不足时，`use`/`place` 返回 `false`，`breakBlock` 返回 `null`。所有物品专属函数在运行时验证参数的实际 key 是 `AEItemKey`。
+`rename(resource, name)`、`bus.drop(resource)`、`use()`、`place()` 和 `break()` 都是 workflow 内的一次性同步操作，不进入调度器，也不应 `yield`。每次调用只尝试一次；目标不可用或来源不足时，`use`/`place` 返回 `false`，`break` 返回 `null`。所有物品专属函数在运行时验证参数的实际 key 是 `AEItemKey`。
 
 ```js
 go(function* () {
@@ -231,7 +231,7 @@ go(function* () {
     // 工具只是来源句柄，不会转移到控制器。耐久和掉落都写回工具来源。
     const tool = storage.extract(item("minecraft:diamond_pickaxe", 1));
     if (tool === null) return;
-    const drops = bus.breakBlock(tool);
+    const drops = bus.break(tool);
     // 非 null 时，drops 是已经存在于 storage 中的 ResourceArray。
 
     // drop 精确扣除资源，并沿总线朝向生成物品实体。
@@ -245,7 +245,28 @@ go(function* () {
 
 所有持物操作都直接修改句柄的 `origin`：执行时精确取出旧 key，完成 Minecraft 交互后把剩余物、新 key、受损工具及掉落重新插入同一来源。工具不需要预先转移或由 workflow 持有。若第三方存储在取出后拒绝写回，无法回写的结果进入 recovery escrow 并使 workflow 失败，避免删除或复制。
 
-`breakBlock` 失败时返回 `null`；成功时返回本次掉落对应的 `ResourceArray`，即使没有掉落也返回空数组。这些只是已写回工具来源的句柄。工具损坏后不再返回工具对象，脚本需要时可重新读取来源。无法正确采掘的方块仍会被破坏，但成功结果为空数组，行为与生存模式玩家规则一致。
+### 8.1 红石
+
+总线同时提供红石读取与输出，两者都是同步查询/设置，不需要 workflow，也不应 `yield`：
+
+- `bus.redstone()`：读取目标方块面向总线面输出的红石等级（0-15），等价于总线贴在目标方块上的那一面收到的信号；总线或目标不可解析、区块未加载时为 `0`。注意读取的是强信号（`getSignal`），目标方块上的红石粉等弱信号源不会被读到。
+- `bus.redstone(level)`：设置总线从物理线缆面向外输出的红石等级（0-15），会更新总线模型朝向的邻居方块；总线不可解析时返回 `false`，成功时返回 `true`。等级不是 0-15 的整数时抛出运行时错误。
+
+```js
+go(function* () {
+    const bus = network("north").buses[0];
+    if (bus.redstone() >= 8) {
+        bus.redstone(15); // 用总线自身输出红石信号
+    } else {
+        bus.redstone(0);
+    }
+    yield sleep(1);
+});
+```
+
+输出等级由总线部件持久化（随总线 NBT 保存），服务器重启后保持。
+
+`break` 失败时返回 `null`；成功时返回本次掉落对应的 `ResourceArray`，即使没有掉落也返回空数组。这些只是已写回工具来源的句柄。工具损坏后不再返回工具对象，脚本需要时可重新读取来源。无法正确采掘的方块仍会被破坏，但成功结果为空数组，行为与生存模式玩家规则一致。
 
 ## 9. 原子性与恢复
 

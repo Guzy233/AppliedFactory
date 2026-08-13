@@ -447,6 +447,23 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public int busRedstoneLevel(FactoryBusAddress bus) {
+        return resolveBusTarget(bus)
+                .map(com.fulent.appliedfactory.factory.FactoryBusTarget::redstoneLevel)
+                .orElse(0);
+    }
+
+    @Override
+    public boolean setBusRedstoneOutput(FactoryBusAddress bus, int level) {
+        var part = resolveBus(bus);
+        if (part.isEmpty()) {
+            return false;
+        }
+        part.get().setRedstoneOutput(level);
+        return true;
+    }
+
+    @Override
     public boolean createEscrow(
             UUID workflowId,
             Direction recoverySide,

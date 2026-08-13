@@ -29,7 +29,7 @@ final class JsBridgeBinder {
             if (method.getAnnotation(JsProperty.class) != null) {
                 throw new IllegalStateException("Global API cannot expose properties: " + method);
             }
-            ScriptableObject.putProperty(scope, method.getName(), function(facade, method));
+            ScriptableObject.putProperty(scope, jsName(method), function(facade, method));
         }
     }
 
@@ -67,7 +67,7 @@ final class JsBridgeBinder {
             var property = method.getAnnotation(JsProperty.class);
             if (property == null) {
                 object.defineProperty(
-                        method.getName(),
+                        jsName(method),
                         function(value, method),
                         ScriptableObject.READONLY | ScriptableObject.PERMANENT);
                 continue;
@@ -219,6 +219,18 @@ final class JsBridgeBinder {
         if (!type.isAnnotationPresent(JsBridge.class)) {
             throw new IllegalArgumentException("Not a JavaScript bridge class: " + type.getName());
         }
+    }
+
+    private static String jsName(Method method) {
+        var annotation = method.getAnnotation(JsName.class);
+        if (annotation == null) {
+            return method.getName();
+        }
+        var name = annotation.value();
+        if (name.isBlank()) {
+            throw new IllegalStateException("@JsName must not be blank: " + method);
+        }
+        return name;
     }
 
     private static String propertyName(String methodName) {

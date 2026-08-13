@@ -269,11 +269,25 @@ final class ScriptApi {
 
     Object breakBlock(
             com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object tool) {
-        requireActiveContext("bus.breakBlock(tool)");
+        requireActiveContext("bus.break(tool)");
         return host.breakBlock(
                         activeContext.workflowId(), bus, requireItemResource(tool))
                 .map(result -> resourceArray(result.origin(), result.bundle()))
                 .orElse(null);
+    }
+
+    Object busRedstone(
+            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object level) {
+        if (level == Undefined.instance || level == null) {
+            return host.busRedstoneLevel(bus);
+        }
+        var number = Context.toNumber(level);
+        if (!Double.isFinite(number) || number != Math.rint(number)
+                || number < 0 || number > 15) {
+            throw Context.reportRuntimeError(
+                    "bus.redstone(level) requires an integer level between 0 and 15");
+        }
+        return host.setBusRedstoneOutput(bus, (int) number);
     }
 
     private void requireActiveContext(String operation) {
@@ -601,8 +615,15 @@ final class JsBus {
         return api.placeItem(address, resource);
     }
 
+    /** JS name is {@code break}; the Java name stays breakBlock because break is a keyword. */
+    @JsName("break")
     public Object breakBlock(Object tool) {
         return api.breakBlock(address, tool);
+    }
+
+    /** Reads (no args) or sets (with a 0-15 level) this bus's redstone. */
+    public Object redstone(Object level) {
+        return api.busRedstone(address, level);
     }
 }
 

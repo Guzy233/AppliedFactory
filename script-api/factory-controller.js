@@ -38,6 +38,8 @@ function itemNbt(resource) {}
 // bus.drop(resource)                     -> boolean (immediate)
 // bus.use(resource)                      -> boolean; source item updated in place
 // bus.place(resource)                    -> boolean; source item updated in place
-// bus.breakBlock(tool)                   -> ResourceArray | null; synchronous
+// bus.break(tool)                        -> ResourceArray | null; synchronous
+// bus.redstone()                        -> number 0-15 (read)
+// bus.redstone(level)                   -> boolean (set, 0-15, immediate)
 //
 // A yielded Action waits for both source resources and destination capacity.

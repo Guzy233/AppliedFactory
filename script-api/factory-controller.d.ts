@@ -97,8 +97,12 @@ interface Bus {
     use(item: Resource): boolean;
     /** 立即使用一个 BlockItem 放置方块；剩余物直接写回来源。 */
     place(block: Resource): boolean;
+    /** 读取目标方块向总线面输出的红石等级（0-15）；总线或目标不可解析时为 0。 */
+    redstone(): number;
+    /** 设置总线从物理线缆面向外输出的红石等级（0-15）；总线不可解析时返回 false。 */
+    redstone(level: number): boolean;
     /** 立即破坏一个方块；失败返回 null，成功返回已写回工具来源的掉落句柄。 */
-    breakBlock(tool: Resource): ResourceArray | null;
+    break(tool: Resource): ResourceArray | null;
 }
 
 interface Network {

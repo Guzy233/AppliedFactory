@@ -58,6 +58,18 @@ public final class FactoryProgram {
         Optional<FactoryResourceRef> breakBlock(
                 UUID workflowId, FactoryBusAddress bus, FactoryResourceRef tool);
 
+        /**
+         * Redstone level the target block emits toward this bus's face, 0-15.
+         * Returns 0 when the bus or its target cannot be resolved or is not loaded.
+         */
+        int busRedstoneLevel(FactoryBusAddress bus);
+
+        /**
+         * Sets the redstone strength this bus emits outward from its physical
+         * cable face, 0-15. Returns false when the bus cannot be resolved.
+         */
+        boolean setBusRedstoneOutput(FactoryBusAddress bus, int level);
+
         boolean createEscrow(
                 UUID workflowId,
                 Direction recoverySide,
