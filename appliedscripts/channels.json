@@ -1,0 +1,18 @@
+[
+  {
+    "id": "ae2:f",
+    "name": "流体"
+  },
+  {
+    "id": "ae2:i",
+    "name": "物品"
+  },
+  {
+    "id": "appflux:flux",
+    "name": "能源"
+  },
+  {
+    "id": "appmek:chemical",
+    "name": "化学品"
+  }
+]

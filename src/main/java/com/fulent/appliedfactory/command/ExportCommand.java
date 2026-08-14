@@ -60,7 +60,7 @@ public final class ExportCommand {
             Files.createDirectories(root);
             writeRecipes(server, root);
             writeChannels(root);
-            patchChannelDeclaration(server);
+            patchChannelDeclaration(root);
             source.sendSuccess(
                     () -> Component.literal("appliedfactory: exported recipes/channels to " + root),
                     false);
@@ -122,15 +122,14 @@ public final class ExportCommand {
     }
 
     /**
-     * Best-effort update of the dev {@code factory-controller.d.ts}
-     * {@code type ResourceChannel} union so the IDE offers autocomplete. Runs only
-     * when the declaration is reachable next to the game dir (dev layout:
-     * {@code <project>/run} + {@code <project>/script-api}).
+     * Best-effort update of the {@code applied_factory.d.ts}
+     * {@code type ResourceChannel} union so the IDE offers autocomplete. Runs
+     * against the declaration in the export target directory, so it only takes
+     * effect when the exported {@code appliedscripts/} folder is the dev
+     * working copy used by the script editor.
      */
-    private static void patchChannelDeclaration(MinecraftServer server) throws IOException {
-        var candidate = server.getServerDirectory()
-                .resolveSibling("script-api")
-                .resolve("factory-controller.d.ts");
+    private static void patchChannelDeclaration(Path root) throws IOException {
+        var candidate = root.resolve("applied_factory.d.ts");
         if (!Files.isRegularFile(candidate)) {
             return;
         }

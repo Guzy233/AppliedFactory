@@ -9,11 +9,6 @@
     "outDir": "generated",
     "skipLibCheck": true
   },
-  "include": [
-    "*.ts",
-    "factory-controller.d.ts"
-  ],
-  "exclude": [
-    "generated"
-  ]
+  "include": ["*.ts"],
+  "exclude": ["generated"]
 }
