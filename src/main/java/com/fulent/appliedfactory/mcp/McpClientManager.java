@@ -12,6 +12,8 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 /** Client-side coordinator: owns the HTTP MCP server, pending request registry and binding. */
 public final class McpClientManager {
+    public static final int DEFAULT_PORT = 39291;
+
     private static final McpClientManager INSTANCE = new McpClientManager();
 
     private final McpRequestRegistry registry = new McpRequestRegistry();
@@ -89,13 +91,33 @@ public final class McpClientManager {
             }
             if (result.accepted()) {
                 binding = new McpBinding(result.dimension(), result.pos(), result.label());
-                mc.player.sendSystemMessage(Component.literal(
-                        "MCP bound to " + result.label()
-                                + " (" + result.dimension() + " " + result.pos().toShortString() + ")"));
+                McpConfig.write(DEFAULT_PORT, binding);
+                if (!isRunning()) {
+                    if (start(DEFAULT_PORT)) {
+                        mc.player.sendSystemMessage(Component.literal(
+                                "MCP bound to " + result.label() + ", server started at "
+                                        + "http://127.0.0.1:" + DEFAULT_PORT + "/mcp"));
+                    } else {
+                        mc.player.sendSystemMessage(Component.literal(
+                                "MCP bound to " + result.label()
+                                        + " but the server could not start (port "
+                                        + DEFAULT_PORT + " in use?)"));
+                    }
+                } else {
+                    mc.player.sendSystemMessage(Component.literal(
+                            "MCP bound to " + result.label()));
+                }
             } else {
                 mc.player.sendSystemMessage(Component.literal(
                         "MCP bind failed: no factory controller in range"));
             }
         });
+    }
+
+    /** Unbinds the current controller and stops the MCP server. */
+    public void unbind() {
+        binding = null;
+        stop();
+        McpConfig.write(DEFAULT_PORT, null);
     }
 }

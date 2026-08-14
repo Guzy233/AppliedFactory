@@ -28,6 +28,7 @@ public final class FactoryControllerProgramScreen
 
     private MultiLineEditBox scriptBox;
     private Checkbox logSubscription;
+    private Button mcpButton;
     private final UUID viewerId;
     private Component saveStatus = Component.empty();
     private int saveStatusColor = 0xffa9d8e9;
@@ -66,9 +67,9 @@ public final class FactoryControllerProgramScreen
                 .bounds(leftPos + imageWidth - 62, topPos + 5, 56, 18)
                 .build());
 
-        addRenderableWidget(Button.builder(
+        mcpButton = addRenderableWidget(Button.builder(
                         Component.translatable("gui.appliedfactory.bind_mcp"),
-                        ignored -> bindToMcp())
+                        ignored -> onMcpButton())
                 .bounds(leftPos + imageWidth - 124, topPos + 5, 56, 18)
                 .build());
 
@@ -88,8 +89,17 @@ public final class FactoryControllerProgramScreen
                 menu.getBlockPos(), scriptBox.getValue()));
     }
 
-    private void bindToMcp() {
-        McpClientManager.get().requestBind(menu.getBlockPos());
+    private boolean boundHere() {
+        var binding = McpClientManager.get().binding();
+        return binding != null && binding.pos().equals(menu.getBlockPos());
+    }
+
+    private void onMcpButton() {
+        if (boundHere()) {
+            McpClientManager.get().unbind();
+        } else {
+            McpClientManager.get().requestBind(menu.getBlockPos());
+        }
     }
 
     private void setLogSubscription(boolean subscribed) {
@@ -103,8 +113,7 @@ public final class FactoryControllerProgramScreen
             return;
         }
         if (payload.saved()) {
-            saveStatus = Component.translatable("gui.appliedfactory.save_success");
-            saveStatusColor = 0xff8fe3af;
+            onClose();
         } else {
             saveStatus = Component.translatable(
                     "gui.appliedfactory.syntax_error", payload.message());
@@ -137,6 +146,23 @@ public final class FactoryControllerProgramScreen
             return true;
         }
         return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+    }
+
+    @Override
+    protected void containerTick() {
+        super.containerTick();
+        mcpButton.setMessage(Component.translatable(
+                boundHere() ? "gui.appliedfactory.unbind_mcp" : "gui.appliedfactory.bind_mcp"));
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // 输入框聚焦时按 E 不关闭 GUI，避免编辑脚本时误关。
+        if (minecraft.options.keyInventory.matches(keyCode, scanCode)
+                && getFocused() == scriptBox) {
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     @Override

@@ -207,8 +207,6 @@ public final class McpTools {
         var binding = McpClientManager.get().binding();
         inner.addProperty("connected", mc.getConnection() != null);
         inner.addProperty("singlePlayer", mc.isSingleplayer());
-        inner.addProperty("mcpRunning", McpClientManager.get().isRunning());
-        inner.addProperty("mcpPort", McpClientManager.get().port());
         if (binding != null) {
             inner.addProperty("bound", true);
             inner.addProperty("dimension", binding.dimension());
@@ -262,7 +260,7 @@ public final class McpTools {
 
     private JsonObject statusSchema() {
         return tool("appliedfactory_status",
-                "Read-only status of the MCP server, the connection and the bound controller.",
+                "Read-only status of the connection and the bound controller.",
                 new JsonObject());
     }
 

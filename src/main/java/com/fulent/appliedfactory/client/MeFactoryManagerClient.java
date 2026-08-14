@@ -3,7 +3,6 @@ package com.fulent.appliedfactory.client;
 import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.DocsExtractor;
 import com.fulent.appliedfactory.mcp.McpClientManager;
-import com.fulent.appliedfactory.mcp.McpCommand;
 
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
@@ -18,7 +17,6 @@ public final class MeFactoryManagerClient {
     public MeFactoryManagerClient(IEventBus modEventBus) {
         modEventBus.addListener(this::registerScreens);
         modEventBus.addListener(this::extractDocsOnClientSetup);
-        NeoForge.EVENT_BUS.addListener(McpCommand::register);
         NeoForge.EVENT_BUS.addListener(MeFactoryManagerClient::onLoggingOut);
     }
 

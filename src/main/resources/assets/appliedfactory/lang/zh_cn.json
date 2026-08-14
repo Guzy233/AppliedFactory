@@ -12,6 +12,7 @@
   "gui.appliedfactory.syntax_error": "语法错误：%s",
   "gui.appliedfactory.subscribe_logs": "订阅日志",
   "gui.appliedfactory.bind_mcp": "绑定MCP",
+  "gui.appliedfactory.unbind_mcp": "解除绑定",
   "chat.appliedfactory.script_error": "工厂控制器 %s 的脚本错误（%s）：%s",
   "chat.appliedfactory.script_log": "工厂控制器 %s 脚本日志：%s"
 }
