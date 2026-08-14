@@ -82,6 +82,15 @@ const eight = network("north").extract("ae2:i", { id: "minecraft:iron_ingot" }, 
 - `channel` 未注册或 `key` 无法被该 channel 的 codec 解码时抛运行时错误；
 - 结果恒为数组：单个命中也是 1 元素数组；空数组的 `.to(target)` 是安全 no-op（立即完成，不移动任何资源）。
 
+`storage(channel?)` 是只读库存查询：返回目标方块**全部**非空槽位，不受总线所贴面的限制——它以"无面"方式查询 capability（NeoForge 的 block capability 允许 null side），熔炉一次就能看到输入、燃料、输出全部三个槽，包括从任何面都取不出的输入。恒返回 `ResourceArray`，无内容时为空数组；`channel` 可选，只取某个 channel：
+
+```js
+const contents = furnace.storage();      // 全部库存（输入/燃料/输出）
+const inputs = furnace.storage("ae2:i"); // 只看物品 channel
+```
+
+`extract` 只报告该面当前能取出的资源；`storage` 报告方块整体库存，用于探线时排查机器卡料或观察输入。`storage` 的结果是普通 Resource 句柄，可以继续 `.to()` / `pushExactlyInto()`，但不可取出的条目在执行时与"不存在"共享语义——转移等待，不移动任何资源，也不会报错。对网络端点而言内容全部可取出，`Network.storage()` 等价于 `extract()`。
+
 句柄创建后资源仍在来源中。如果执行前被其他设备消耗，可等待 Action 会等待同一 AEKey 重新满足数量。AEKey 对应的资源是同质的，句柄不追踪某一个槽位或实体。
 
 同一个 Resource 可以创建多个 Action，但它不代表对普通端点的独占所有权。多个 Action 竞争相同来源时由服务器主线程执行顺序决定，后执行者在库存不足时等待。

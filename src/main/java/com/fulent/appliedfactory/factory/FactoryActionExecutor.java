@@ -114,27 +114,59 @@ public final class FactoryActionExecutor {
         return true;
     }
 
-    /** Current concrete contents of an external endpoint. */
+    /** Current concrete contents of an external endpoint (extractable only). */
     public List<FactoryResource> available(FactoryEndpoint endpoint) {
         var amounts = new LinkedHashMap<AEKey, Long>();
         if (endpoint.kind() == FactoryEndpoint.Kind.NETWORK) {
-            var network = networkResolver.resolve(endpoint.networkSide()).orElse(null);
-            if (network == null) {
-                return List.of();
-            }
-            collect(network.storage(), amounts);
+            collectNetwork(amounts, endpoint);
         } else {
             var bus = busResolver.resolve(endpoint.bus()).orElse(null);
-            if (bus == null) {
-                return List.of();
-            }
-            for (var channel : bus.channels()) {
-                var storage = bus.storage(channel);
-                if (storage != null) {
-                    collect(storage, amounts);
+            if (bus != null) {
+                for (var channel : bus.channels()) {
+                    var storage = bus.storage(channel);
+                    if (storage != null) {
+                        collect(storage, amounts);
+                    }
                 }
             }
         }
+        return toResources(amounts);
+    }
+
+    /**
+     * Current full contents of an external endpoint: for a bus target, the
+     * block's <em>whole container</em> (all slots, queried without a face), so
+     * machine inputs that reject extraction are visible too. Network endpoints
+     * have no such slots, so this equals {@link #available(FactoryEndpoint)}
+     * there. Actions created from non-extractable entries wait exactly like
+     * entries that do not exist.
+     */
+    public List<FactoryResource> storage(FactoryEndpoint endpoint) {
+        var amounts = new LinkedHashMap<AEKey, Long>();
+        if (endpoint.kind() == FactoryEndpoint.Kind.NETWORK) {
+            collectNetwork(amounts, endpoint);
+        } else {
+            var bus = busResolver.resolve(endpoint.bus()).orElse(null);
+            if (bus != null) {
+                for (var channel : bus.channelsAll()) {
+                    var storage = bus.storageAll(channel);
+                    if (storage != null) {
+                        collect(storage, amounts);
+                    }
+                }
+            }
+        }
+        return toResources(amounts);
+    }
+
+    private void collectNetwork(LinkedHashMap<AEKey, Long> amounts, FactoryEndpoint endpoint) {
+        var network = networkResolver.resolve(endpoint.networkSide()).orElse(null);
+        if (network != null) {
+            collect(network.storage(), amounts);
+        }
+    }
+
+    private static List<FactoryResource> toResources(LinkedHashMap<AEKey, Long> amounts) {
         return amounts.entrySet().stream()
                 .filter(entry -> entry.getValue() > 0)
                 .map(entry -> new FactoryResource(entry.getKey(), entry.getValue()))

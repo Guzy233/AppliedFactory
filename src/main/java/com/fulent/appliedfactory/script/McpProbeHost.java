@@ -95,6 +95,11 @@ public final class McpProbeHost implements FactoryProgram.Host {
     }
 
     @Override
+    public List<FactoryResource> storageContents(FactoryEndpoint endpoint) {
+        return controller.storageContents(endpoint);
+    }
+
+    @Override
     public List<String> channels(FactoryBusAddress bus) {
         return controller.channels(bus);
     }

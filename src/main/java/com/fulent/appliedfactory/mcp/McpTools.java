@@ -226,7 +226,7 @@ public final class McpTools {
         code.addProperty("type", "string");
         code.addProperty("description",
                 "Factory script (Rhino ES6). Same API as a controller program: network(side),"
-                        + " buses/target, extract(), item(), stack(), recipes(), log(), sleep(),"
+                        + " buses/target, extract(), storage(), item(), stack(), recipes(), log(), sleep(),"
                         + " go(function*(){...}) with yield resource.to(target) /"
                         + " pushExactlyInto(target). go() generators run as ordinary passive"
                         + " jobs: transfers wait on resources/capacity, sleep crosses real ticks."

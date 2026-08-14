@@ -48,6 +48,13 @@ public final class FactoryProgram {
         List<FactoryResource> availableResources(FactoryEndpoint endpoint);
 
         /**
+         * Full current contents of an external endpoint, including slots that
+         * reject extraction from the accessed face (e.g. a machine input).
+         * Network endpoints equal {@link #availableResources(FactoryEndpoint)}.
+         */
+        List<FactoryResource> storageContents(FactoryEndpoint endpoint);
+
+        /**
          * The key-type ids ({"@literal "ae2:i"}, {"@literal "ae2:f"}, ...) a bus target
          * currently supports for input/output, independent of its contents: the set of
          * channels the target face exposes a capability for.

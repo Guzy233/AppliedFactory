@@ -185,6 +185,24 @@ final class ScriptApi {
         return resourceArray(origin, List.of(new FactoryResource(key, amount)));
     }
 
+    /**
+     * Read-only view of an endpoint's full contents, including slots that reject
+     * extraction from the accessed face. Actions created from such entries wait
+     * exactly like entries that do not exist; {@code channel} is optional.
+     */
+    Object storage(FactoryEndpoint endpoint, Object rawChannel) {
+        var origin = FactoryResourceOrigin.endpoint(endpoint);
+        var contents = host.storageContents(endpoint);
+        if (rawChannel == Undefined.instance || rawChannel == null) {
+            return resourceArray(origin, contents);
+        }
+        var channel = resolveChannel(Context.toString(rawChannel));
+        return resourceArray(origin, contents.stream()
+                .filter(resource -> ScriptApi.channel(resource.key())
+                        .equals(channel.getId().toString()))
+                .toList());
+    }
+
     List<String> channels(FactoryBusAddress bus) {
         return host.channels(bus);
     }
@@ -602,6 +620,10 @@ final class JsNetwork {
     public Object extract(Object channel, Object key, Object amount) {
         return api.extractResources(FactoryEndpoint.network(side), channel, key, amount);
     }
+
+    public Object storage(Object channel) {
+        return api.storage(FactoryEndpoint.network(side), channel);
+    }
 }
 
 @JsBridge
@@ -673,6 +695,10 @@ final class JsBus {
 
     public Object extract(Object channel, Object key, Object amount) {
         return api.extractResources(FactoryEndpoint.bus(address), channel, key, amount);
+    }
+
+    public Object storage(Object channel) {
+        return api.storage(FactoryEndpoint.bus(address), channel);
     }
 
     public boolean drop(Object item) {

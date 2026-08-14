@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.fulent.appliedfactory.AppliedFactory;
 import com.mojang.authlib.GameProfile;
 
 import net.minecraft.core.BlockPos;
@@ -65,6 +66,12 @@ public final class FactoryBusTarget {
     private final Direction accessDirection;
     @Nullable
     private Map<AEKeyType, ExternalStorageStrategy> strategies;
+    /**
+     * Strategies created with a {@code null} side, exposing the target block's
+     * whole container instead of one face's slot subset.
+     */
+    @Nullable
+    private Map<AEKeyType, ExternalStorageStrategy> allStrategies;
 
     /**
      * @param level           The world containing the target block
@@ -392,6 +399,40 @@ public final class FactoryBusTarget {
     }
 
     /**
+     * Same as {@link #storage(AEKeyType)} but the wrapper is built from
+     * strategies queried with a {@code null} side, so it exposes the target
+     * block's <em>whole container</em> instead of the single face's slot subset:
+     * e.g. a furnace lists input, fuel and output slots regardless of which face
+     * the bus touches. Extraction from slots that reject it still returns 0 —
+     * the wrapper only exists for read-only inspection.
+     */
+    @Nullable
+    public MEStorage storageAll(AEKeyType type) {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
+            return null;
+        }
+        var strategy = allStrategies(serverLevel).get(type);
+        return strategy == null ? null : strategy.createWrapper(false, NO_CHANGE_LISTENER);
+    }
+
+    /**
+     * The key channels the target block exposes when queried without a face,
+     * i.e. the channels that can list the block's whole container.
+     */
+    public Set<AEKeyType> channelsAll() {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
+            return Set.of();
+        }
+        var result = new LinkedHashSet<AEKeyType>();
+        for (var entry : allStrategies(serverLevel).entrySet()) {
+            if (entry.getValue().createWrapper(false, NO_CHANGE_LISTENER) != null) {
+                result.add(entry.getKey());
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    /**
      * The key channels this target face currently exposes.
      */
     public Set<AEKeyType> channels() {
@@ -413,6 +454,27 @@ public final class FactoryBusTarget {
                     serverLevel, position, targetFace());
         }
         return strategies;
+    }
+
+    /**
+     * Strategies built with a {@code null} side so they wrap the whole container.
+     * If a registered addon strategy cannot handle a null side, falls back to the
+     * single-face strategies so {@link #storageAll(AEKeyType)} still works.
+     */
+    private Map<AEKeyType, ExternalStorageStrategy> allStrategies(ServerLevel serverLevel) {
+        if (allStrategies == null) {
+            try {
+                allStrategies = StackWorldBehaviors.createExternalStorageStrategies(
+                        serverLevel, position, null);
+            } catch (RuntimeException exception) {
+                AppliedFactory.LOGGER.warn(
+                        "An external storage strategy rejected a null side at {}; "
+                                + "falling back to the single-face view for storage()",
+                        position, exception);
+                allStrategies = strategies(serverLevel);
+            }
+        }
+        return allStrategies;
     }
 
     @Nullable

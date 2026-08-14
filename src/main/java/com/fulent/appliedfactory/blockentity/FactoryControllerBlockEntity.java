@@ -408,6 +408,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public List<FactoryResource> storageContents(FactoryEndpoint endpoint) {
+        return actionExecutor.storage(endpoint);
+    }
+
+    @Override
     public List<String> channels(FactoryBusAddress bus) {
         return resolveBusTarget(bus)
                 .map(target -> target.channels().stream()

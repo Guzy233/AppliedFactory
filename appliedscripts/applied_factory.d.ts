@@ -102,6 +102,13 @@ interface Bus {
   extract(channel: ResourceChannel): ResourceArray;
   extract(channel: ResourceChannel, key: NbtCompound): ResourceArray;
   extract(channel: ResourceChannel, key: NbtCompound, amount: number): ResourceArray;
+  /**
+   * 只读库存查询：返回目标方块**全部库存**（所有槽位，不受总线所贴面的限制，
+   * 含取不出的输入槽），恒返回 ResourceArray，无内容时为空数组；可传 channel 过滤。
+   * 结果可转成 Action，但不可取出的条目在执行时与"不存在"共享语义（转移等待）。
+   */
+  storage(): ResourceArray;
+  storage(channel: ResourceChannel): ResourceArray;
   /** 立即尝试精确取走物品并从总线朝向丢出，不进入调度器。 */
   drop(item: Resource): boolean;
   /** 立即空手使用目标方块；本次未成功时返回 false。 */
@@ -135,6 +142,12 @@ interface Network {
   extract(channel: ResourceChannel): ResourceArray;
   extract(channel: ResourceChannel, key: NbtCompound): ResourceArray;
   extract(channel: ResourceChannel, key: NbtCompound, amount: number): ResourceArray;
+  /**
+   * 只读库存查询：网络内容全部可取出，等价于 extract()；恒返回 ResourceArray。
+   * 可传 channel 过滤。
+   */
+  storage(): ResourceArray;
+  storage(channel: ResourceChannel): ResourceArray;
 }
 
 type ResourceTarget = Network | Bus;
