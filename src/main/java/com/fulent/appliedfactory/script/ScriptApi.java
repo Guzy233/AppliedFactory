@@ -125,20 +125,64 @@ final class ScriptApi {
                                 action.source(), result.remaining()));
     }
 
-    Object resource(FactoryEndpoint endpoint, Object rawSpec) {
+    /**
+     * Unified extract query: {@code extract(channel?, key?, amount?)}. Always returns a
+     * {@link #resourceArray(FactoryResourceOrigin, List)} (possibly empty, never null).
+     * Omitting {@code amount} (or passing -1) means "as much as available"; a positive
+     * amount caps the result at that quantity.
+     */
+    Object extractResources(
+            FactoryEndpoint endpoint,
+            Object rawChannel,
+            Object rawKey,
+            Object rawAmount) {
         var origin = FactoryResourceOrigin.endpoint(endpoint);
-        if (rawSpec == Undefined.instance || rawSpec == null) {
+        if (rawChannel == Undefined.instance || rawChannel == null) {
             return resourceArray(origin, host.availableResources(endpoint));
         }
-        var spec = binder.unwrap(rawSpec, JsResourceSpec.class, "resource spec");
-        var amount = spec.amount();
-        if (amount == -1) {
-            amount = host.availableAmount(origin, spec.key());
+        var channel = resolveChannel(Context.toString(rawChannel));
+        var snapshot = host.availableResources(endpoint);
+        if (rawKey == Undefined.instance || rawKey == null) {
+            return resourceArray(origin, snapshot.stream()
+                    .filter(resource -> ScriptApi.channel(resource.key())
+                            .equals(channel.getId().toString()))
+                    .toList());
         }
-        return amount <= 0
-                ? null
-                : resourceValue(new FactoryResourceRef(
-                        origin, List.of(new FactoryResource(spec.key(), amount))));
+        if (!(rawKey instanceof Scriptable keyObject)) {
+            throw Context.reportRuntimeError("extract key must be an NBT object");
+        }
+        var key = channel.loadKeyFromTag(
+                host.registries(),
+                NbtJs.fromObject(Context.getCurrentContext(), keyObject, "key"));
+        if (key == null) {
+            throw Context.reportRuntimeError(
+                    "Invalid key for AE resource channel " + channel.getId());
+        }
+        var available = snapshot.stream()
+                .filter(resource -> resource.key().equals(key))
+                .mapToLong(FactoryResource::amount)
+                .findFirst()
+                .orElse(0L);
+        if (available <= 0) {
+            return resourceArray(origin, List.of());
+        }
+        long amount = available;
+        if (rawAmount != Undefined.instance && rawAmount != null) {
+            var number = Context.toNumber(rawAmount);
+            if (!Double.isFinite(number) || number != Math.rint(number)
+                    || Math.abs(number) > 9_007_199_254_740_991D) {
+                throw Context.reportRuntimeError("Resource amount must be positive or -1");
+            }
+            var requested = (long) number;
+            if (requested == -1) {
+                // same as omitted: as much as possible
+            } else if (requested <= 0) {
+                throw Context.reportRuntimeError("Resource amount must be positive or -1");
+            } else {
+                amount = Math.min(available, requested);
+            }
+        }
+        return resourceArray(origin, List.of(new FactoryResource(key, amount)));
     }
 
     List<String> channels(FactoryBusAddress bus) {
@@ -314,6 +358,18 @@ final class ScriptApi {
         return key.getType().getId().toString();
     }
 
+    static AEKeyType resolveChannel(String value) {
+        var id = ResourceLocation.tryParse(value);
+        if (id == null) {
+            throw Context.reportRuntimeError("Invalid AE resource channel id: " + value);
+        }
+        try {
+            return AEKeyTypes.get(id);
+        } catch (IllegalArgumentException exception) {
+            throw Context.reportRuntimeError("Unknown AE resource channel: " + value);
+        }
+    }
+
     CompoundTag optionalNbt(Object value, String name) {
         if (value == Undefined.instance || value == null) {
             return null;
@@ -426,7 +482,7 @@ final class JsGlobals {    private final ScriptApi api;
             throw Context.reportRuntimeError("stack key must be an NBT object");
         }
         return spec(
-                resolveChannel(channel),
+                ScriptApi.resolveChannel(channel),
                 NbtJs.fromObject(Context.getCurrentContext(), keyObject, "key"),
                 amount);
     }
@@ -460,18 +516,6 @@ final class JsGlobals {    private final ScriptApi api;
         return resources.stream()
                 .map(resource -> new GenericStack(resource.key(), resource.amount()))
                 .toList();
-    }
-
-    private static AEKeyType resolveChannel(String value) {
-        var id = ResourceLocation.tryParse(value);
-        if (id == null) {
-            throw Context.reportRuntimeError("Invalid AE resource channel id: " + value);
-        }
-        try {
-            return AEKeyTypes.get(id);
-        } catch (IllegalArgumentException exception) {
-            throw Context.reportRuntimeError("Unknown AE resource channel: " + value);
-        }
     }
 
     private static void requireAmount(long amount) {
@@ -555,8 +599,8 @@ final class JsNetwork {
         return Undefined.instance;
     }
 
-    public Object extract(Object spec) {
-        return api.resource(FactoryEndpoint.network(side), spec);
+    public Object extract(Object channel, Object key, Object amount) {
+        return api.extractResources(FactoryEndpoint.network(side), channel, key, amount);
     }
 }
 
@@ -627,8 +671,8 @@ final class JsBus {
         return value.toString();
     }
 
-    public Object extract(Object spec) {
-        return api.resource(FactoryEndpoint.bus(address), spec);
+    public Object extract(Object channel, Object key, Object amount) {
+        return api.extractResources(FactoryEndpoint.bus(address), channel, key, amount);
     }
 
     public boolean drop(Object item) {

@@ -68,12 +68,19 @@ yield products.to(network("north"));
 
 仍可使用索引、`find()`、`filter()` 和 `for...of`。`order.input` 同样是 `ResourceArray`，所以可以直接写 `yield order.input.pushExactlyInto(bus)`。
 
-`extract(spec)` 返回一个精确 Resource。固定正数量的 spec 即使来源暂时缺货也会生成句柄，后续 Action 可以等待；`-1` 会在调用时固化为当前可用量，数量为零时返回 `null`。
+`extract(channel?, key?, amount?)` 是唯一的查询入口，三个参数都可选，恒返回 `ResourceArray`；没有满足条件的资源时返回空数组，**绝不返回 null**：
 
 ```js
-const iron = network("north").extract(item("minecraft:iron_ingot", 8));
-const allCoal = network("north").extract(item("minecraft:coal", -1));
+const iron = network("north").extract("ae2:i");                                // 该 channel 全部资源
+const allCoal = network("north").extract("ae2:i", { id: "minecraft:coal" });   // 尽可能多
+const eight = network("north").extract("ae2:i", { id: "minecraft:iron_ingot" }, 8); // 上限 8
 ```
+
+- 只传 `channel`：返回该 channel 下所有资源，每个为完整可用量；
+- 传 `channel` + `key`：返回该 key 的资源，数量为当前可用量（尽可能多）；当前无货时返回空数组；
+- 再传 `amount`：数量为 `min(可用量, amount)` 的上限封顶；`amount` 省略或为 `-1` 都表示尽可能多，必须是正整数或 `-1`，否则抛运行时错误；
+- `channel` 未注册或 `key` 无法被该 channel 的 codec 解码时抛运行时错误；
+- 结果恒为数组：单个命中也是 1 元素数组；空数组的 `.to(target)` 是安全 no-op（立即完成，不移动任何资源）。
 
 句柄创建后资源仍在来源中。如果执行前被其他设备消耗，可等待 Action 会等待同一 AEKey 重新满足数量。AEKey 对应的资源是同质的，句柄不追踪某一个槽位或实体。
 
@@ -155,7 +162,7 @@ if (sword !== undefined) {
     const nbt = itemNbt(sword);
     const damage = nbt.components["minecraft:damage"];
     const exactSword = network("north").extract(
-        stack(sword.channel, sword.key, 1)
+        sword.channel, sword.key, 1
     );
 }
 ```
@@ -199,18 +206,18 @@ go(function* () {
     const used = bus.use(named);
 
     // place 运行时要求 amount=1 且 key 是 BlockItem。
-    const stone = storage.extract(item("minecraft:stone", 1));
-    const placed = stone !== null && bus.place(stone);
+    const stone = storage.extract("ae2:i", { id: "minecraft:stone" }, 1);
+    const placed = stone.length > 0 && bus.place(stone[0]);
 
     // 工具只是来源句柄，不会转移到控制器。耐久和掉落都立刻写回工具来源。
-    const tool = storage.extract(item("minecraft:diamond_pickaxe", 1));
-    if (tool === null) return;
-    const drops = bus.break(tool);
+    const tool = storage.extract("ae2:i", { id: "minecraft:diamond_pickaxe" }, 1);
+    if (tool.length === 0) return;
+    const drops = bus.break(tool[0]);
     // 非 null 时，drops 是已经存在于 storage 中的 ResourceArray。
 
     // drop 精确扣除资源，并沿总线朝向生成物品实体。
-    const cobble = storage.extract(item("minecraft:cobblestone", 16));
-    const dropped = cobble !== null && bus.drop(cobble);
+    const cobble = storage.extract("ae2:i", { id: "minecraft:cobblestone" }, 16);
+    const dropped = cobble.length > 0 && bus.drop(cobble[0]);
 
     // 不传物品时保持空手使用方块的语义。
     const activated = bus.use();

@@ -93,9 +93,15 @@ interface Bus {
   /** 目标面当前支持输入/输出的资源 channel id 列表（如 "ae2:i"、"ae2:f"），不依赖实际库存。 */
   readonly channels: readonly string[];
 
-  /** 无参数时返回当前精确资源句柄快照。 */
+  /**
+   * 统一查询：extract(channel?, key?, amount?)，三个参数都可选，恒返回 ResourceArray。
+   * 没有满足条件的资源时返回空数组，绝不返回 null。
+   * amount 省略或 -1 表示尽可能多（当前可用量），正数表示上限封顶。
+   */
   extract(): ResourceArray;
-  extract(spec: ResourceSpec): Resource | null;
+  extract(channel: ResourceChannel): ResourceArray;
+  extract(channel: ResourceChannel, key: NbtCompound): ResourceArray;
+  extract(channel: ResourceChannel, key: NbtCompound, amount: number): ResourceArray;
   /** 立即尝试精确取走物品并从总线朝向丢出，不进入调度器。 */
   drop(item: Resource): boolean;
   /** 立即空手使用目标方块；本次未成功时返回 false。 */
@@ -120,9 +126,15 @@ interface Network {
 
   /** 拓扑变化时同步调用 */
   onChange(callback: () => void): void;
-  /** 无参数时返回当前精确资源句柄快照。 */
+  /**
+   * 统一查询：extract(channel?, key?, amount?)，三个参数都可选，恒返回 ResourceArray。
+   * 没有满足条件的资源时返回空数组，绝不返回 null。
+   * amount 省略或 -1 表示尽可能多（当前可用量），正数表示上限封顶。
+   */
   extract(): ResourceArray;
-  extract(spec: ResourceSpec): Resource | null;
+  extract(channel: ResourceChannel): ResourceArray;
+  extract(channel: ResourceChannel, key: NbtCompound): ResourceArray;
+  extract(channel: ResourceChannel, key: NbtCompound, amount: number): ResourceArray;
 }
 
 type ResourceTarget = Network | Bus;

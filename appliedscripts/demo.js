@@ -7,8 +7,6 @@ let furnaces_output = [];
 
 let lamps = [];
 
-const fluxSpec = stack("appflux:flux", { type: "FE" }, -1);
-
 let machines = [];
 
 let tanks = [];
@@ -65,12 +63,11 @@ go(function* () {
         }
       }
     }
-    machines.forEach((machine) => main.extract(fluxSpec).to(machine).now());
+    machines.forEach((machine) =>
+      main.extract("appflux:flux", { type: "FE" }).to(machine).now(),
+    );
     tanks.forEach((tank) =>
-      main
-        .extract(stack("appmek:chemical", { id: "mekanism:chlorine" }, -1))
-        .to(tank)
-        .now(),
+      main.extract("appmek:chemical", { id: "mekanism:chlorine" }).to(tank).now(),
     );
     yield sleep(20);
   }
