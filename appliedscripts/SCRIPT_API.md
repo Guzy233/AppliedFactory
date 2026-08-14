@@ -156,6 +156,23 @@ const success = resource.pushExactlyInto(target).now();
 - `pushExactlyInto(...).now()` 只尝试一次，返回 boolean；
 - `.now()` 不进入调度器，不跨 tick 等待。
 
+### 5.4 资源数组（ResourceArray）的批量转移
+
+`ResourceArray`（`extract()`、`storage()`、`order.input` 的返回值）整体是一个可批量转移的批次，`to` / `pushExactlyInto` 作用于整个数组：
+
+**`array.to(target)`** —— 等价于对数组里的每个资源分别执行一次 `to`：逐个资源独立转移当前可行的部分（每次取 `min(来源可用, 目标容量)`），某个资源暂时缺货或目标放不下**不影响其他资源**移动；一次执行后 `remaining` 保留未移动的部分，再次执行（`.now()` 或调度重试）只处理剩余。数组为空时立即完成（安全 no-op）。
+
+**`array.pushExactlyInto(target)`** —— 整个数组作为一个不可分割的批次：要求**所有资源同时**满足"来源拥有完整数量、且目标能一次接收完整数量"，任一资源不满足则整批不动并继续等待；条件满足后一次性把整个批次完整转移，不产生部分进度。数组为空时立即成功。
+
+```js
+const products = furnace.extract();
+yield products.to(network("north"));        // 每个资源能移多少移多少，互不影响
+yield order.input.pushExactlyInto(bus);     // 全部输入凑齐且机器一次能吃下才移动
+```
+
+- `array.to(target).now()` 只尝试一次，返回仍未转移的 `ResourceArray`；全部移走时返回 `null`；
+- `array.pushExactlyInto(target).now()` 只尝试一次，返回整批是否成功（boolean）。
+
 ## 6. Codec key、NBT 与物品定位
 
 每个 Resource 都暴露统一的 `channel` 和 `key`。`key` 可原样传回 `stack()`，由对应 channel 的 codec 解码：

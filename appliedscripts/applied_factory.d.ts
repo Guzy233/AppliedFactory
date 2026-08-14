@@ -49,7 +49,17 @@ interface Resource {
 
 /** 真正的 JS 数组，并附带针对整个快照的批量转移方法。 */
 interface ResourceArray extends ReadonlyArray<Resource> {
+  /**
+   * 批量部分转移：等价于对数组内每个资源分别执行 to()，逐个资源独立移动当前可行的部分
+   * （min(来源可用, 目标容量)）；单个资源缺货或目标放不下不影响其他资源。
+   * now() 返回仍未转移的 ResourceArray，全部移走时为 null。
+   */
   to(target: ResourceTarget): TransferAction<ResourceArray | null>;
+  /**
+   * 批量精确转移：要求数组内所有资源同时都能完整转移（来源有完整数量且目标能一次接收）
+   * 才执行，任一不满足则整批等待、不移动任何资源；执行时整批一次性完整转移。
+   * now() 返回是否全部成功。
+   */
   pushExactlyInto(target: ResourceTarget): TransferAction<boolean>;
 }
 
