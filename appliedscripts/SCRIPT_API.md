@@ -55,11 +55,11 @@ Bus 句柄只绑定总线地址，不保存目标机器身份：
 
 `bus.channels` 返回目标面当前支持输入/输出的资源 channel id 数组（如 `"ae2:i"`、`"ae2:f"`），**不依赖目标是否实际含有资源**：它反映该面对每个已注册 AE channel 是否暴露了能力（如熔炉顶面能放输入、底面能取产物），通过 AE2 的策略注册表查询，覆盖任意扩展 channel，包括但不限于能源、化学品等通道。
 
+`bus.channels` 含有某个通道意味着这个面至少有输入、输出能力中的一个，但不是所有 channels 都能同时进行输入、输出。
+
 ## 4. Resource
 
 Resource 是统一、不可变的精确来源句柄 `(origin, channel, key, amount)`。`channel` 直接使用 `AEKeyType#getId()` 的注册表 ID；`key` 是对应 `AEKeyType` codec 自己的 NBT。内置物品和流体 channel 分别为 `"ae2:i"`、`"ae2:f"`，扩展 channel 不需要声明新 Resource 类型或编写 Java 适配器。Resource 不会在创建时提取或锁定普通端点库存。
-
-无参数 `extract()` 返回来源当前每个精确 AEKey 的 `ResourceArray`。它是真正的只读 JavaScript 数组，同时可以为整个快照创建一个批量转移动作：
 
 ```js
 const products = furnace.extract();
@@ -284,31 +284,48 @@ go(function* () {
 - 无法完整回滚时写入控制器内部 recovery escrow，禁止删除或复制资源；
 - PARTIAL Action 只从进度中扣除实际成功进入目标的数量。
 
-## 9. 脚本内配方查询
+## 9. 脚本内配方获取：require_recipes 预编译宏
 
-`recipes()` 返回从服务器 `RecipeManager` 惰性构建的配方索引，覆盖全部**处理类配方**（已排除 `minecraft:crafting`/`minecraft:stonecutting`/`minecraft:smithing`，将由专门的 AE 组件进行）。
+`require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数：MCP 的 `appliedfactory_execute`/`appliedfactory_upload` 在发送前，客户端读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量——行为像预编译宏，控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`，因此**通过控制器 GUI 直接保存的脚本不能使用它**。
 
+每个配方条目为 `{id, type, inputs, outputs, json}`：`inputs`/`outputs` 是 `{channel, key, amount}` 资源声明（与 `stack()` 同形），可以直接引用到 `registerProcessingPattern`；`json` 保留原始配方 JSON 作为只读参考。数据文件由 `/appliedfactory export`（或 `setupworkspace`）在本地存档中生成；服务端通用规范化只覆盖**物品**（输出取主产物精确数量），流体、化学品、能量、输入数量 >1 的配方以 `json` 为准。
+
+**有玩家执行时，客户端会用 JEI 重新转储全部配方并合并覆盖 `inputs`/`outputs`**：JEI 的槽位包含 `Recipe#getIngredients()` 之外的输入（如神秘农业 `infusion` 的祭坛基底）、tag/多选槽的全部可选项、以及经 ae2-jei-integration 转换器解析的流体与化学品。服务端的 `id`/`type`/`json` 保持不变，只升级资源声明；没有玩家或客户端没有 JEI 时保留服务端数据。
+
+**输入槽不拍平**：一个输入槽对应配方的一个 ingredient 槽位。tag 或多选材料槽（如 `#minecraft:logs_that_burn`）会保留 `options` 数组（完整 `{channel, key, amount}` 条目，列出该槽接受的全部可选项），`key` 是代表物（第一个可选项，可直接用于注册）；配方只需要其中**任意一个**，不是全部。只有一个可选项时省略 `options`。
+
+**machine 映射不虚构**：服务端先按配方自己声明的机器图标（toast symbol）写 `recipe_types.json`（默认工作台图标视为"未声明"并排除）。有玩家执行导出命令时，还会请求该玩家客户端用 JEI 反查每个配方类型的催化剂（JEI 配方标签页展示的代表机器），合并覆盖到 `recipe_types.json`——所以 AE2 充能器、压印机这类不声明 toast symbol 的模组机器，只要 JEI 注册了催化剂，就会被正确标出；JEI 也没有信息时才不出现在文件中，绝不会错误地标成 `minecraft:crafting_table`。
+
+**过滤器**是对象字面量，字段值可为单个字符串或字符串数组（any-of）：
+
+| 字段 | 语义 |
+| --- | --- |
+| `id` | 配方 id 精确匹配 |
+| `type` | 配方类型 id 精确匹配，如 `"minecraft:smelting"` |
+| `machine` | 可处理该配方的机器方块 id（经 `recipe_types.json` 反查其配方类型），如 `"minecraft:furnace"` |
+| `input` / `output` | 任一输入槽的代表物或任一 `option` / 任一输出资源的 `key.id` 精确匹配 |
+
+多个字段为 AND，字段省略表示不限制。过滤出 0 条时展开为 `[]`；`processing_recipes.json` 缺失或过滤器非法（未知字段、非字面量参数）时打包报错并终止本次 execute/upload。
 
 ```js
-const r = recipes();
+// 配方类型 → 配方
+const smelt = require_recipes({ type: "minecraft:smelting" });
 
-// 方块 ↔ 配方类型互查（一般多对一：一种配方类型可被多种机器处理）
-r.typesOfMachine("minecraft:furnace");   // ["minecraft:smelting"]
-r.machinesOfType("minecraft:smelting");  // ["minecraft:furnace", ...]
+// 机器 → 配方（内部反查 recipe_types.json）
+const furnaceRecipes = require_recipes({ machine: "minecraft:furnace" });
 
-// 配方类型 → 配方（唯一语义）
-const smelt = r.byType("minecraft:smelting");
+// 按输入/输出物品过滤，多字段 AND
+const iron = require_recipes({ type: "minecraft:smelting", output: "minecraft:iron_ingot" });
 
-// 自行解析原始 JSON 取物品，用现有注册器注册
-const iron = smelt.find(x => x.id.includes("raw_iron"));
-const json = iron.json;                     // 原始配方 JSON 对象
-const inputs = [item(json.ingredient.item, 1)];
-const outputs = [item(json.result.id, json.result.count ?? 1)];
-registerProcessingPattern([{ orderNetwork: "west", inputs, outputs }], function* (order) {
-  yield order.input.pushExactlyInto(furnaceBus);
-});
+// 直接取规范化资源注册，无需解析原始 JSON
+registerProcessingPattern(
+  [{ orderNetwork: "west", inputs: iron[0].inputs, outputs: iron[0].outputs }],
+  function* (order) {
+    yield order.input.pushExactlyInto(furnaceBus);
+  }
+);
 ```
 
-- `recipes().all()` / `byType(typeId)` 返回 `Recipe[]`（真实数组，可直接 `filter`/`map`）；
-- 每个 `Recipe` 含 `id`、`type`、`machine`（`getToastSymbol()` 的机器物品 id）、`json`（原始配方 JSON；无法重编码时为 null）；
-- 机器与方块共用注册表，`machine` 直接与 `bus.target.id` 比较。
+- 展开结果是真实数组，可直接 `filter`/`map`/`find`；
+- `registerProcessingPattern` 的 `inputs`/`outputs` 接受 `stack()`/`item()` 句柄，也接受普通 `{channel, key, amount}` 对象（与 `Recipe.inputs`/`outputs` 同形，可直接引用）；
+- 展开后的源码仍受 32k 程序上限约束，过滤器应尽量收窄到实际需要的配方。

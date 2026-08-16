@@ -2,13 +2,31 @@ You are operating a Minecraft **Applied Factory** controller through MCP. You ca
 probe programs against a factory controller, read their logs, iterate, and finally upload a
 production program. The factory is real: networks, machines, resources and recipes exist in the
 world and behave like Minecraft + Applied Energistics 2.
+The "bus" below and in the API docs refers to the "Factory Bus", a kind of AE2 part added by this mod as world executor, interactor, and I/O endpoint. Available capabilities are defined on the "Bus" object in the docs.
 
 ## Tools
 
-- `appliedfactory_status` — read-only status (connection, bound controller, MCP server state).
+- `appliedfactory_status` — read-only status (connection, bound controller, MCP server state, `workspace` path).
 - `appliedfactory_execute` — run a probe program; returns `logs` + `result` + `reason`. Main tool.
+  Script can be passed inline as `code`, or written to a file in the appliedscripts workspace and
+  passed as `file` (e.g. `file: "probe1.js"`) — use the file form for long scripts (e.g. batches
+  with baked recipe globals) to keep tool calls short.
 - `appliedfactory_upload` — compile and replace the controller's production program
-  (compile-checked; on failure the existing program is untouched).
+  (compile-checked; on failure the existing program is untouched). Same inline `source` / `file`
+  choice as execute.
+- **`require_recipes(filter)`**: client-side precompile macro for recipe data — the client
+  expands it from the local `processing_recipes.json` before sending, so the controller
+  receives baked recipe literals (see the "Recipes" note below). Prefer it over `include()`
+  for recipes.
+- **`include("file")`**: resolved by the client before sending (recursively), for generic
+  data/declaration files that live separately in the appliedscripts workspace. Two forms:
+  - `include("file.json")` — a `.json` file is inlined as a JS expression (JSON is valid
+    JS), so it can be assigned: `const data = include("data.json")`.
+  - `include("data.js")` — a `.js` file must be a top-level statement; its content is inlined
+    there and top-level declarations (const/var/function) become visible to the rest of the
+    program.
+  Paths resolve relative to the including file, then the appliedscripts workspace. The bundled
+  source still must fit the 32k program limit.
 
 If you never see these tools in your toolset, remind the user to configure the MCP server
 (http://localhost:39291/mcp) for the specific agent scaffold you are in, ask the user whether you
@@ -35,4 +53,26 @@ should do the configuration, and remind them to restart the app afterwards.
 - For multi-step processing, it's better to write separate patterns so AE2 can organize the production.
 - Handling a small pattern frequently to reach high production consumes a large amount of I/O time;
   you'd better multiply both the inputs and outputs so that they can be processed in one go.
-- In this folder there is `processing_recipes.json`, which contains all of the exported processing recipes. They are the same as those on the actual server, so you can inspect them as a reference, but you cannot read this file directly from a script. If you need recipes in a script, use the `recipes()` API — it returns the same structure.
+- **Recipes**: `require_recipes(filter)` is a client-side precompile macro. The client reads
+  the local `processing_recipes.json` (plus `recipe_types.json` for `machine` filters) from the
+  appliedscripts workspace and replaces the call with the matching recipe literals before the
+  script is sent — the controller never sees the call, only baked data. Filter fields:
+  `id`/`type`/`machine`/`input`/`output`; each value may be a string or a string array
+  (any-of), multiple fields AND. Zero matches expand to `[]`; a missing/malformed data file or
+  an invalid filter fails the execute/upload with a clear error. The exported
+  `processing_recipes.json` in this folder is the same as the server's: entries are
+  `{id, type, inputs, outputs, json}` — `inputs`/`outputs` are `{channel, key, amount}` specs
+  (the same shape `stack()` accepts) referenceable by `registerProcessingPattern` directly, and
+  `json` is the raw recipe for anything the normalized lists miss.  An
+  input slot whose ingredient accepts multiple items (tags/choices) carries an
+  `options` array listing all of them — the recipe needs any one, not all; the
+  slot's `key` is the first option and is safe to register. `recipe_types.json`
+  starts from each recipe type's declared machine.
+  filters narrow — the expanded source must fit the 32k program limit.
+- The JS runtime is Rhino. Due to known bugs, it's better to use a let-loop: `for (let i = 0; ...)`, and use `let` definition instead of `const` definition. If you observe any strange behaviour during script execution, it might be a bug of the runtime. Search for bug reports of `Rhino` rather than guessing the reason yourself.
+- The API reference can be found in this folder ("./").
+- Most machines do not expose extraction capabilities for input resources, as doing so would cause inputs to be pulled unintentionally. Therefore, it makes sense for `storage()` to return a larger resource list. Meanwhile, resources appearing in `storage()` but not in `extract()` are most likely previous or in-flight inputs.
+- All valid values of `ResourceChannel` can be processed by a pattern handler — some addons have registered them as available channels.
+- Empty resources and ResourceArrays can be safely transferred (no-op), so extra checks are not needed.
+- Those networks that contain lots of ingredients are likely the ordering networks, and those that only have machines are likely the production networks. They can also be the same one - order and produce all in one.
+- Modpacks may modify the recipes so trust the exported rather than your memory.

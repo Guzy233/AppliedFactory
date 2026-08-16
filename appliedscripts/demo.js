@@ -1,3 +1,11 @@
+// require_recipes is a client-side precompile macro: the MCP client replaces
+// the call with the matching recipe literals from processing_recipes.json
+// before the script is sent, so this file can reference baked recipe data.
+const ironSmelt = require_recipes({
+  type: "minecraft:smelting",
+  output: "minecraft:iron_ingot",
+});
+
 const production = network("east");
 const main = network("west");
 const DIRECTIONS = ["up", "down", "north", "south", "west", "east"];
@@ -54,8 +62,8 @@ go(function* () {
     for (var bus of furnaces_output) {
       var output = bus.extract();
       if (output.length > 0) {
+        log(`${output[0].amount} ${output[0].id} returned!`);
         output.to(main).now();
-        log("something returned!");
         for (var lamp of lamps) {
           lamp.redstone(15);
           yield sleep(2);
@@ -63,11 +71,16 @@ go(function* () {
         }
       }
     }
+    // demo to transfer energy
     machines.forEach((machine) =>
       main.extract("appflux:flux", { type: "FE" }).to(machine).now(),
     );
+    // demo to transfer chemicals
     tanks.forEach((tank) =>
-      main.extract("appmek:chemical", { id: "mekanism:chlorine" }).to(tank).now(),
+      main
+        .extract("appmek:chemical", { id: "mekanism:chlorine" })
+        .to(tank)
+        .now(),
     );
     yield sleep(20);
   }

@@ -1,5 +1,9 @@
 package com.fulent.appliedfactory.mcp;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -64,10 +68,7 @@ public final class McpTools {
     }
 
     private JsonObject execute(JsonObject arguments) throws McpToolException {
-        if (!arguments.has("code")) {
-            throw new McpToolException(-32602, "code is required");
-        }
-        var code = arguments.get("code").getAsString();
+        var code = scriptSource(arguments, "code");
         if (code.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
             throw new McpToolException(-32602,
                     "code too long (max " + ControllerProgram.MAX_SOURCE_LENGTH + " chars)");
@@ -153,10 +154,7 @@ public final class McpTools {
     }
 
     private JsonObject upload(JsonObject arguments) throws McpToolException {
-        if (!arguments.has("source")) {
-            throw new McpToolException(-32602, "source is required");
-        }
-        var source = arguments.get("source").getAsString();
+        var source = scriptSource(arguments, "source");
         if (source.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
             throw new McpToolException(-32602,
                     "source too long (max " + ControllerProgram.MAX_SOURCE_LENGTH + " chars)");
@@ -207,6 +205,7 @@ public final class McpTools {
         var binding = McpClientManager.get().binding();
         inner.addProperty("connected", mc.getConnection() != null);
         inner.addProperty("singlePlayer", mc.isSingleplayer());
+        inner.addProperty("workspace", workspaceDir().toString());
         if (binding != null) {
             inner.addProperty("bound", true);
             inner.addProperty("dimension", binding.dimension());
@@ -218,16 +217,83 @@ public final class McpTools {
         return inner;
     }
 
+    /**
+     * The appliedscripts workspace next to the game directory — where
+     * {@code /appliedfactory setupworkspace} exports the recipe reference and
+     * where script files referenced by the {@code file} tool argument are read.
+     */
+    private static Path workspaceDir() {
+        return Minecraft.getInstance().gameDirectory.toPath().resolve("appliedscripts");
+    }
+
+    /**
+     * Script source for execute/upload: a {@code file} argument (filename
+     * relative to the appliedscripts workspace) takes precedence over the inline
+     * {@code inlineName} argument, so long scripts with baked recipes can live in
+     * files instead of the tool call. Top-level {@code include("file.js")} calls
+     * are resolved against the workspace before sending, and
+     * {@code require_recipes(filter)} calls are expanded to recipe literals.
+     */
+    private static String scriptSource(JsonObject arguments, String inlineName)
+            throws McpToolException {
+        String bundled;
+        if (arguments.has("file")) {
+            var file = arguments.get("file").getAsString();
+            var path = ScriptBundler.resolveFile(file, null);
+            if (path == null) {
+                throw new McpToolException(-32602,
+                        "script file not found: " + file + " (resolved against the appliedscripts workspace)");
+            }
+            bundled = ScriptBundler.bundle(readFile(path, file), path.getParent());
+        } else if (arguments.has(inlineName)) {
+            bundled = ScriptBundler.bundle(arguments.get(inlineName).getAsString(), null);
+        } else {
+            throw new McpToolException(-32602, inlineName + " (inline) or file is required");
+        }
+        if (bundled.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
+            throw new McpToolException(-32602, "bundled source exceeds "
+                    + ControllerProgram.MAX_SOURCE_LENGTH + " chars after include()/require_recipes()"
+                    + " expansion; narrow the require_recipes filters (or trim include()s)");
+        }
+        return bundled;
+    }
+
+    private static String readFile(Path path, String name) throws McpToolException {
+        try {
+            var source = Files.readString(path, StandardCharsets.UTF_8);
+            if (source.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
+                throw new McpToolException(-32602, "script file too long (max "
+                        + ControllerProgram.MAX_SOURCE_LENGTH + " chars): " + name);
+            }
+            return source;
+        } catch (IOException exception) {
+            throw new McpToolException(-32602,
+                    "failed to read script file " + name + ": " + exception.getMessage());
+        }
+    }
+
     private JsonObject executeSchema() {
         var properties = new JsonObject();
+        var file = new JsonObject();
+        file.addProperty("type", "string");
+        file.addProperty("description",
+                "Script filename relative to the appliedscripts workspace (e.g. \"probe1.js\");"
+                        + " the file content is executed as the script. Prefer this over inline"
+                        + " 'code' for long scripts (e.g. batches with baked recipe globals).");
+        properties.add("file", file);
         var code = new JsonObject();
         code.addProperty("type", "string");
         code.addProperty("description",
-                "Factory script (Rhino ES6). Same API as a controller program: network(side),"
-                        + " buses/target, extract(), storage(), item(), stack(), recipes(), log(), sleep(),"
+                "Factory script (Rhino ES6), either inline here or as a file via 'file'."
+                        + " Same API as a controller program: network(side),"
+                        + " buses/target, extract(), storage(), item(), stack(), log(), sleep(),"
                         + " go(function*(){...}) with yield resource.to(target) /"
                         + " pushExactlyInto(target). go() generators run as ordinary passive"
                         + " jobs: transfers wait on resources/capacity, sleep crosses real ticks."
+                        + " require_recipes({type|machine|input|output|id}) is a client-side"
+                        + " macro: the client expands it from appliedscripts/processing_recipes.json"
+                        + " before sending, so the baked recipe literals can be referenced by"
+                        + " registerProcessingPattern directly."
                         + " The value of the last expression is returned as 'result'."
                         + " log()/console.log() output is returned in 'logs' directly.");
         properties.add("code", code);
@@ -239,23 +305,33 @@ public final class McpTools {
                         + " (hard ceiling 1 hour). 20 ticks = 1 second.");
         properties.add("timeoutTicks", timeout);
         return tool("appliedfactory_execute",
-                "Runs a probe program against the bound controller and returns its logs.",
-                properties, "code");
+                "Runs a probe program against the bound controller and returns its logs."
+                        + " Pass the script inline as 'code', or write it to a file in the"
+                        + " appliedscripts workspace and pass the filename as 'file'.",
+                properties);
     }
 
     private JsonObject uploadSchema() {
         var properties = new JsonObject();
+        var file = new JsonObject();
+        file.addProperty("type", "string");
+        file.addProperty("description",
+                "Program filename relative to the appliedscripts workspace (e.g. \"production.js\");"
+                        + " the file content is uploaded. Prefer this over inline 'source' for"
+                        + " long programs with baked recipe globals.");
+        properties.add("file", file);
         var source = new JsonObject();
         source.addProperty("type", "string");
         source.addProperty("description",
-                "Full controller program source. Compiles first; on failure the existing"
+                "Full controller program source, either inline here or as a file via 'file'."
+                        + " Compiles first; on failure the existing"
                         + " production program is left untouched. Same semantics as saving"
                         + " in the controller GUI.");
         properties.add("source", source);
         return tool("appliedfactory_upload",
                 "Replaces the bound controller's production program. Prefer testing with"
                         + " appliedfactory_execute before uploading.",
-                properties, "source");
+                properties);
     }
 
     private JsonObject statusSchema() {

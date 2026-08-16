@@ -30,8 +30,6 @@ import com.fulent.appliedfactory.script.ControllerProgram;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
 
-import org.jetbrains.annotations.Nullable;
-
 import appeng.api.config.Actionable;
 import appeng.api.config.PowerMultiplier;
 import appeng.api.crafting.IPatternDetails;
@@ -95,8 +93,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private List<OfferedPattern> offeredPatterns = List.of();
     private String controllerProgram = ControllerProgram.DEFAULT_SOURCE;
     private boolean patternsDirty = true;
-    @Nullable
-    private com.fulent.appliedfactory.factory.FactoryRecipeIndex cachedRecipeIndex;
     /**
      * The compiled program revision for {@link #controllerProgram}, owning all suspended jobs.
      * Null while the current source fails to compile; the source itself is still kept so the
@@ -387,19 +383,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     public Optional<com.fulent.appliedfactory.factory.FactoryBusTarget> busTarget(
             com.fulent.appliedfactory.factory.FactoryBusAddress address) {
         return resolveBusTarget(address);
-    }
-
-    @Override
-    @Nullable
-    public com.fulent.appliedfactory.factory.FactoryRecipeIndex recipeIndex() {
-        if (cachedRecipeIndex == null) {
-            var server = level instanceof ServerLevel serverLevel ? serverLevel.getServer() : null;
-            if (server == null) {
-                return null;
-            }
-            cachedRecipeIndex = com.fulent.appliedfactory.factory.FactoryRecipeIndex.build(server);
-        }
-        return cachedRecipeIndex;
     }
 
     @Override

@@ -164,6 +164,7 @@ type ResourceTarget = Network | Bus;
 
 interface PatternDefinition {
   readonly orderNetwork: Direction;
+  /** stack()/item() 句柄，或普通 {channel, key, amount} 对象（Recipe.inputs/Recipe.outputs 同形，可直接引用）。 */
   readonly inputs: readonly ResourceSpec[];
   readonly outputs: readonly ResourceSpec[];
 }
@@ -211,28 +212,47 @@ declare function rename(item: Resource, name: string): Resource | null;
 /** 读取完整 ItemStack 保存 NBT；不是 ae2:i 时抛出运行时错误。 */
 declare function itemNbt(item: Resource): NbtCompound;
 
-/** 处理类配方（已排除合成/切石/锻造）。json 为原始配方 JSON，自行解析取物品注册。 */
+/** 一个输入槽位：key 是该槽的代表物（可直接注册），options 列出该槽接受的全部可选项。 */
+interface RecipeInput extends ResourceSpec {
+  /**
+   * 该槽接受的全部可选项（完整 ResourceSpec，含 channel）；tag/多选材料槽才有，
+   * 只有一个可选项时省略。配方只需要其中任意一个，不是全部。
+   */
+  readonly options?: readonly ResourceSpec[];
+}
+
+/** 处理类配方（已排除合成/切石/锻造）。inputs/outputs 是已规范化的资源声明，可直接用于 registerProcessingPattern。 */
 interface Recipe {
   readonly id: string;
   /** 配方类型 id，如 "minecraft:smelting"。 */
   readonly type: string;
-  /** 机器方块物品 id（Recipe#getToastSymbol()），如 "minecraft:furnace"；无则 null。 */
-  readonly machine: string | null;
-  /** 原始配方 JSON；无法重编码时为 null。 */
+  /** 规范化输入（服务端通用提取仅覆盖物品；流体/化学品/输入数量以 json 为准）。槽位带 options 表示任选其一。 */
+  readonly inputs: readonly RecipeInput[];
+  /** 规范化主输出，与 stack() 的 ResourceSpec 同形。 */
+  readonly outputs: readonly ResourceSpec[];
+  /** 原始配方 JSON 只读参考（复杂配方如流体/化学品/能量/多输出）；无法重编码时为 null。 */
   readonly json: Record<string, NbtValue> | null;
 }
 
-/** 配方索引：方块 ↔ 配方类型互查，再由类型查配方（唯一语义）。 */
-interface RecipeIndex {
-  /** 全部处理配方。 */
-  all(): Recipe[];
-  /** 按配方类型查配方，如 "minecraft:smelting"。 */
-  byType(typeId: string): Recipe[];
-  /** 方块可处理的配方类型，如 "minecraft:furnace" → ["minecraft:smelting"]。 */
-  typesOfMachine(machineId: string): string[];
-  /** 某配方类型涉及的机器方块 id。 */
-  machinesOfType(typeId: string): string[];
+/** require_recipes 的过滤器：多个字段为 AND 关系，单个字段内的多个值为 any-of；省略的字段不限制。 */
+interface RecipeFilter {
+  /** 配方 id 精确匹配。 */
+  readonly id?: string | readonly string[];
+  /** 配方类型 id 精确匹配，如 "minecraft:smelting"。 */
+  readonly type?: string | readonly string[];
+  /** 可处理该配方的机器方块 id（经 recipe_types.json 反查其类型），如 "minecraft:furnace"。 */
+  readonly machine?: string | readonly string[];
+  /** 任一输入槽的代表物（或该槽任一 option）的 key.id 精确匹配。 */
+  readonly input?: string | readonly string[];
+  /** 任一输出资源的 key.id 精确匹配。 */
+  readonly output?: string | readonly string[];
 }
 
-/** 从服务器 RecipeManager 构建的配方索引（脚本运行时惰性构建）。 */
-declare function recipes(): RecipeIndex;
+/**
+ * 客户端预编译宏（仅 MCP 的 appliedfactory_execute / appliedfactory_upload 生效）：
+ * 发送前客户端读取 appliedscripts/processing_recipes.json（及 recipe_types.json），
+ * 按过滤器选出配方后把整个调用替换为配方数组字面量——表现如同预编译宏，控制器运行时
+ * 不存在此函数，GUI 直接保存的脚本不能使用。过滤器没有命中时展开为 []；
+ * processing_recipes.json 缺失或过滤器非法时打包报错。
+ */
+declare function require_recipes(filter?: RecipeFilter): readonly Recipe[];

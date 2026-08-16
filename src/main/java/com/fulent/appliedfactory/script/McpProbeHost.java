@@ -7,14 +7,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-import org.jetbrains.annotations.Nullable;
-
 import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryBusTarget;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
 import com.fulent.appliedfactory.factory.FactoryProgram;
-import com.fulent.appliedfactory.factory.FactoryRecipeIndex;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.factory.FactoryResourceOrigin;
 import com.fulent.appliedfactory.factory.FactoryResourceRef;
@@ -81,12 +78,6 @@ public final class McpProbeHost implements FactoryProgram.Host {
     @Override
     public Optional<FactoryBusTarget> busTarget(FactoryBusAddress address) {
         return controller.busTarget(address);
-    }
-
-    @Override
-    @Nullable
-    public FactoryRecipeIndex recipeIndex() {
-        return controller.recipeIndex();
     }
 
     @Override

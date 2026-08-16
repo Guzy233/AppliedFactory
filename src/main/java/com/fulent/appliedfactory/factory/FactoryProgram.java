@@ -38,13 +38,6 @@ public final class FactoryProgram {
 
         Optional<FactoryBusTarget> busTarget(FactoryBusAddress address);
 
-        /**
-         * Lazily-built index of all processing recipes, or null when there is no
-         * server to read them from (e.g. client-side).
-         */
-        @Nullable
-        FactoryRecipeIndex recipeIndex();
-
         List<FactoryResource> availableResources(FactoryEndpoint endpoint);
 
         /**

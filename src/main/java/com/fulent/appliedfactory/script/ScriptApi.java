@@ -6,7 +6,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.jetbrains.annotations.Nullable;
 import org.mozilla.javascript.Context;
 import org.mozilla.javascript.Function;
 import org.mozilla.javascript.NativeArray;
@@ -18,8 +17,6 @@ import com.fulent.appliedfactory.factory.FactoryAction;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
 import com.fulent.appliedfactory.factory.FactoryProgram;
-import com.fulent.appliedfactory.factory.FactoryRecipe;
-import com.fulent.appliedfactory.factory.FactoryRecipeIndex;
 import com.fulent.appliedfactory.factory.FactoryResource;
 import com.fulent.appliedfactory.factory.FactoryResourceOrigin;
 import com.fulent.appliedfactory.factory.FactoryResourceRef;
@@ -205,11 +202,6 @@ final class ScriptApi {
 
     List<String> channels(FactoryBusAddress bus) {
         return host.channels(bus);
-    }
-
-    @Nullable
-    FactoryRecipeIndex recipeIndex() {
-        return host.recipeIndex();
     }
 
     JsOrder order(ScriptExecutionContext context) {
@@ -430,10 +422,6 @@ final class JsGlobals {    private final ScriptApi api;
         return new JsSleepAction(new FactorySleepAction(ticks));
     }
 
-    public JsRecipes recipes() {
-        return new JsRecipes(api);
-    }
-
     public Object go(Function factory) {
         api.registration().requireOpen();
         api.registration().passiveHandlers.add(factory);
@@ -521,13 +509,51 @@ final class JsGlobals {    private final ScriptApi api;
         }
         var result = new ArrayList<FactoryResource>();
         for (long index = 0; index < array.getLength(); index++) {
-            var delegate = api.delegate(array.get((int) index, array));
-            if (!(delegate instanceof JsResourceSpec spec) || spec.amount() <= 0) {
-                throw Context.reportRuntimeError(name + " requires exact positive resource specs");
-            }
-            result.add(new FactoryResource(spec.key(), spec.amount()));
+            result.add(spec(array.get((int) index, array), name));
         }
         return FactoryResourceRef.normalize(result);
+    }
+
+    /**
+     * Accepts either a {@code stack()}/{@code item()} spec handle or a plain
+     * {@code {channel, key, amount}} object literal (the same shape the recipe
+     * reference exports and {@code Recipe.inputs}/{@code Recipe.outputs} use), so
+     * baked recipe globals can be referenced at registration directly.
+     */
+    private FactoryResource spec(Object raw, String name) {
+        var delegate = api.delegate(raw);
+        if (delegate instanceof JsResourceSpec spec) {
+            if (spec.amount() <= 0) {
+                throw Context.reportRuntimeError(name + " requires exact positive resource specs");
+            }
+            return new FactoryResource(spec.key(), spec.amount());
+        }
+        if (raw instanceof Scriptable object) {
+            var rawChannel = ScriptableObject.getProperty(object, "channel");
+            if (rawChannel != Scriptable.NOT_FOUND && rawChannel != Undefined.instance) {
+                var rawKey = ScriptableObject.getProperty(object, "key");
+                var rawAmount = ScriptableObject.getProperty(object, "amount");
+                if (rawKey instanceof Scriptable keyObject
+                        && rawAmount != Scriptable.NOT_FOUND && rawAmount != Undefined.instance) {
+                    var channel = ScriptApi.resolveChannel(Context.toString(rawChannel));
+                    var key = channel.loadKeyFromTag(
+                            api.host().registries(),
+                            NbtJs.fromObject(Context.getCurrentContext(), keyObject, name + ".key"));
+                    if (key == null) {
+                        throw Context.reportRuntimeError(
+                                name + " has an invalid key for channel " + channel.getId());
+                    }
+                    var amount = Context.toNumber(rawAmount);
+                    if (!Double.isFinite(amount) || amount != Math.rint(amount)
+                            || amount <= 0) {
+                        throw Context.reportRuntimeError(
+                                name + " requires exact positive resource amounts");
+                    }
+                    return new FactoryResource(key, (long) amount);
+                }
+            }
+        }
+        throw Context.reportRuntimeError(name + " requires resource specs");
     }
 
     private static List<GenericStack> genericStacks(List<FactoryResource> resources) {
@@ -938,80 +964,6 @@ final class JsSleepAction {
 
     FactoryAction action() {
         return action;
-    }
-}
-
-@JsBridge
-final class JsRecipes {
-    private final ScriptApi api;
-
-    JsRecipes(ScriptApi api) {
-        this.api = api;
-    }
-
-    @Nullable
-    private FactoryRecipeIndex index() {
-        return api.recipeIndex();
-    }
-
-    /** All processing recipes (crafting/stonecutter/smithing excluded). */
-    public List<JsRecipe> all() {
-        var index = index();
-        return index == null ? List.of() : index.all().stream().map(JsRecipe::new).toList();
-    }
-
-    /** Recipes of one recipe type, e.g. {@code minecraft:smelting}. */
-    public List<JsRecipe> byType(String typeId) {
-        var index = index();
-        return index == null ? List.of() : index.ofType(typeId).stream().map(JsRecipe::new).toList();
-    }
-
-    /** Recipe types a machine block can process, e.g. {@code minecraft:furnace}. */
-    public List<String> typesOfMachine(String machineId) {
-        var index = index();
-        return index == null ? List.of() : index.typesOfMachine(machineId);
-    }
-
-    /** Machine block ids found among recipes of one recipe type. */
-    public List<String> machinesOfType(String typeId) {
-        var index = index();
-        return index == null ? List.of() : index.machinesOfType(typeId);
-    }
-}
-
-@JsBridge
-final class JsRecipe {
-    private final FactoryRecipe recipe;
-
-    JsRecipe(FactoryRecipe recipe) {
-        this.recipe = recipe;
-    }
-
-    @JsProperty
-    public String getId() {
-        return recipe.id();
-    }
-
-    @JsProperty
-    public String getType() {
-        return recipe.type();
-    }
-
-    @JsProperty
-    @Nullable
-    public String getMachine() {
-        return recipe.machine();
-    }
-
-    /**
-     * The recipe's raw JSON (Gson-decoded object graph). Scripts parse it to pick
-     * concrete input/output keys and register patterns with
-     * {@code registerProcessingPattern}; AE itself does not support tag inputs.
-     */
-    @JsProperty
-    @Nullable
-    public Object getJson() {
-        return recipe.json();
     }
 }
 

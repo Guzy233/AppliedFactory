@@ -96,7 +96,11 @@ dependencies {
     compileOnly "mezz.jei:jei-${minecraft_version}-neoforge-api:${jei_version}"
     localRuntime "mezz.jei:jei-${minecraft_version}-neoforge:${jei_version}"
 
+    // Client-side recipe dump reuses ae2-jei-integration's ingredient-to-stack
+    // converters (items/fluids built-in, chemicals via Applied Mekanistics).
+    compileOnly "curse.maven:ae2-jei-integration-1074338:${ae2_jei_integration_file_id}"
     localRuntime "curse.maven:ae2-jei-integration-1074338:${ae2_jei_integration_file_id}"
+
     localRuntime "curse.maven:jade-324717:${jade_file_id}"
 
 }
@@ -124,11 +128,14 @@ sourceSets.main.resources.srcDir generateModMetadata
 neoForge.ideSyncTask generateModMetadata
 
 // include docs for conding agents
-var generateDocs = tasks.register("generateDocs", Copy) {
+// Sync (not Copy) so files removed from appliedscripts are also removed from
+// the packaged docs instead of lingering from earlier builds.
+var generateDocs = tasks.register("generateDocs", Sync) {
     from("appliedscripts") {
         include "*"
         exclude "channels.json"
         exclude "processing_recipes.json"
+        exclude "recipe_types.json"
         into "assets/appliedfactory/docs"
     }
     into "build/generated/docsResources"
