@@ -256,3 +256,9 @@ interface RecipeFilter {
  * 展开为 []；processing_recipes.json 缺失或过滤器非法时打包报错。
  */
 declare function require_recipes(filter?: RecipeFilter): readonly Recipe[];
+
+/**
+ * 将外部文件包含进脚本
+ * @param file 要导入的文件名，路径相对脚本文件寻址
+ */
+declare function include(file);

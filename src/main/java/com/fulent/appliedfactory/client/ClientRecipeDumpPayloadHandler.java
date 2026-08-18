@@ -29,10 +29,9 @@ import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import appeng.api.stacks.GenericStack;
-import mezz.jei.api.gui.IRecipeLayoutDrawable;
 import mezz.jei.api.gui.ingredient.IRecipeSlotView;
-import mezz.jei.api.ingredients.IIngredientType;
 import mezz.jei.api.ingredients.ITypedIngredient;
+import mezz.jei.api.recipe.IFocusGroup;
 import mezz.jei.api.recipe.RecipeIngredientRole;
 import mezz.jei.api.recipe.category.IRecipeCategory;
 import mezz.jei.api.runtime.IJeiRuntime;
@@ -76,46 +75,7 @@ public final class ClientRecipeDumpPayloadHandler {
             var ids = recipeIds(level);
             var focusGroup = runtime.getJeiHelpers().getFocusFactory().getEmptyFocusGroup();
             for (var category : runtime.getRecipeManager().createRecipeCategoryLookup().get().toList()) {
-                var typeId = category.getRecipeType().getUid().toString();
-                if (FactoryRecipes.isCraftingType(typeId)) {
-                    continue;
-                }
-                for (var recipe : runtime.getRecipeManager()
-                        .createRecipeLookup(category.getRecipeType()).get().toList()) {
-                    var id = recipeId(category, recipe, ids);
-                    if (id == null || registries == null) {
-                        continue;
-                    }
-                    List<JsonObject> inputs;
-                    List<JsonObject> outputs;
-                    try {
-                        // The raw IRecipeCategory cast erases the layout's type
-                        // parameter, so resolve the Optional value by instanceof.
-                        var maybe = runtime.getRecipeManager()
-                                .createRecipeLayoutDrawable((IRecipeCategory) category, recipe, focusGroup);
-                        if (maybe.isPresent() && maybe.get() instanceof IRecipeLayoutDrawable<?> drawable) {
-                            var slots = drawable.getRecipeSlotsView();
-                            inputs = resources(slots.getSlotViews(RecipeIngredientRole.INPUT), registries);
-                            outputs = resources(slots.getSlotViews(RecipeIngredientRole.OUTPUT), registries);
-                        } else {
-                            var supplier = runtime.getRecipeManager()
-                                    .getRecipeIngredients((IRecipeCategory) category, recipe);
-                            inputs = flatResources(supplier.getIngredients(RecipeIngredientRole.INPUT), registries);
-                            outputs = flatResources(supplier.getIngredients(RecipeIngredientRole.OUTPUT), registries);
-                        }
-                    } catch (RuntimeException ignored) {
-                        continue;
-                    }
-                    if (inputs.isEmpty() || outputs.isEmpty()) {
-                        continue;
-                    }
-                    var entry = new JsonObject();
-                    entry.addProperty("id", id);
-                    entry.addProperty("type", typeId);
-                    entry.add("inputs", toArray(inputs));
-                    entry.add("outputs", toArray(outputs));
-                    entries.add(entry);
-                }
+                appendCategoryEntries(entries, runtime, category, focusGroup, registries, ids);
             }
         }
         var json = GSON.toJson(entries);
@@ -133,6 +93,54 @@ public final class ClientRecipeDumpPayloadHandler {
             UUID requestId, int index, int total, boolean available, String json) {
         PacketDistributor.sendToServer(new RecipeDumpChunkPayload(
                 requestId, index, total, available, json));
+    }
+
+    /** Keeps the category's recipe type paired with each recipe without raw generic casts. */
+    private static <T> void appendCategoryEntries(
+            JsonArray entries,
+            IJeiRuntime runtime,
+            IRecipeCategory<T> category,
+            IFocusGroup focusGroup,
+            HolderLookup.Provider registries,
+            Map<Recipe<?>, ResourceLocation> ids) {
+        var typeId = category.getRecipeType().getUid().toString();
+        if (FactoryRecipes.isCraftingType(typeId)) {
+            return;
+        }
+        var recipeManager = runtime.getRecipeManager();
+        for (var recipe : recipeManager.createRecipeLookup(category.getRecipeType()).get().toList()) {
+            var id = recipeId(category, recipe, ids);
+            if (id == null) {
+                continue;
+            }
+            List<JsonObject> inputs;
+            List<JsonObject> outputs;
+            try {
+                var drawable = recipeManager
+                        .createRecipeLayoutDrawable(category, recipe, focusGroup)
+                        .orElse(null);
+                if (drawable != null) {
+                    var slots = drawable.getRecipeSlotsView();
+                    inputs = resources(slots.getSlotViews(RecipeIngredientRole.INPUT), registries);
+                    outputs = resources(slots.getSlotViews(RecipeIngredientRole.OUTPUT), registries);
+                } else {
+                    var supplier = recipeManager.getRecipeIngredients(category, recipe);
+                    inputs = flatResources(supplier.getIngredients(RecipeIngredientRole.INPUT), registries);
+                    outputs = flatResources(supplier.getIngredients(RecipeIngredientRole.OUTPUT), registries);
+                }
+            } catch (RuntimeException ignored) {
+                continue;
+            }
+            if (inputs.isEmpty() || outputs.isEmpty()) {
+                continue;
+            }
+            var entry = new JsonObject();
+            entry.addProperty("id", id);
+            entry.addProperty("type", typeId);
+            entry.add("inputs", toArray(inputs));
+            entry.add("outputs", toArray(outputs));
+            entries.add(entry);
+        }
     }
 
     /**
@@ -184,8 +192,9 @@ public final class ClientRecipeDumpPayloadHandler {
     }
 
     @Nullable
-    private static JsonObject resource(ITypedIngredient<?> typed, HolderLookup.Provider registries) {
-        var converter = IngredientConverters.getConverter((IIngredientType) typed.getType());
+    private static <T> JsonObject resource(
+            ITypedIngredient<T> typed, HolderLookup.Provider registries) {
+        var converter = IngredientConverters.getConverter(typed.getType());
         if (converter == null) {
             return null;
         }
@@ -223,10 +232,10 @@ public final class ClientRecipeDumpPayloadHandler {
     }
 
     @Nullable
-    private static String recipeId(
-            IRecipeCategory<?> category, Object recipe, Map<Recipe<?>, ResourceLocation> ids) {
+    private static <T> String recipeId(
+            IRecipeCategory<T> category, T recipe, Map<Recipe<?>, ResourceLocation> ids) {
         try {
-            var id = ((IRecipeCategory) category).getRegistryName(recipe);
+            var id = category.getRegistryName(recipe);
             if (id != null) {
                 return id.toString();
             }

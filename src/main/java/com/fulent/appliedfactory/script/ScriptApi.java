@@ -13,7 +13,6 @@ import org.mozilla.javascript.Scriptable;
 import org.mozilla.javascript.ScriptableObject;
 import org.mozilla.javascript.Undefined;
 
-import com.fulent.appliedfactory.factory.FactoryAction;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
 import com.fulent.appliedfactory.factory.FactoryProgram;
@@ -929,41 +928,6 @@ final class JsResourceOrigin {
         return endpoint.kind() == FactoryEndpoint.Kind.NETWORK
                 ? new JsNetwork(api, endpoint.networkSide())
                 : new JsBus(api, endpoint.bus());
-    }
-}
-
-@JsBridge
-final class JsTransferAction {
-    private final ScriptApi api;
-    private final FactoryTransferAction action;
-    private final boolean arrayResult;
-
-    JsTransferAction(
-            ScriptApi api, FactoryTransferAction action, boolean arrayResult) {
-        this.api = api;
-        this.action = action;
-        this.arrayResult = arrayResult;
-    }
-
-    FactoryAction action() {
-        return action;
-    }
-
-    public Object now() {
-        return api.performNow(action, arrayResult);
-    }
-}
-
-@JsBridge
-final class JsSleepAction {
-    private final FactorySleepAction action;
-
-    JsSleepAction(FactorySleepAction action) {
-        this.action = action;
-    }
-
-    FactoryAction action() {
-        return action;
     }
 }
 

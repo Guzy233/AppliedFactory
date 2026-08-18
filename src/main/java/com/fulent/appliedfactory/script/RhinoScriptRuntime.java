@@ -208,7 +208,7 @@ public final class RhinoScriptRuntime implements ScriptRuntime {
         protected Context makeContext() {
             var context = super.makeContext();
             context.setLanguageVersion(Context.VERSION_ES6);
-            context.setOptimizationLevel(0);
+            context.setInterpretedMode(false);
             context.setInstructionObserverThreshold(INSTRUCTION_OBSERVER_THRESHOLD);
             context.setClassShutter(className -> false);
             return context;

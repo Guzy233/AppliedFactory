@@ -256,7 +256,7 @@ final class JsBridgeBinder {
     /** Native JS object carrying its facade outside the visible property namespace. */
     private static final class BridgeObject extends NativeObject {
         private static final long serialVersionUID = 1L;
-        private final Object delegate;
+        private final transient Object delegate;
 
         private BridgeObject(Object delegate) {
             this.delegate = delegate;
