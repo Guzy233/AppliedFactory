@@ -275,26 +275,15 @@ go(function* () {
 
 输出等级由总线部件持久化（随总线 NBT 保存），服务器重启后保持。
 
-## 8. 原子性与恢复
+## 8. 脚本内配方获取：require_recipes 预编译宏
 
-所有资源操作都在服务器线程执行，仍然需要处理第三方存储模拟结果与实际执行不一致的问题。
+`require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数。MCP 的 `appliedfactory_execute`/`appliedfactory_upload` 在发送前，以及控制器 GUI 每次保存前，客户端都会读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量。控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`。
 
-- EXACT Action 先模拟来源和目标，再执行完整转移；
-- 目标实际拒绝时优先回滚到来源；
-- 无法完整回滚时写入控制器内部 recovery escrow，禁止删除或复制资源；
-- PARTIAL Action 只从进度中扣除实际成功进入目标的数量。
-
-## 9. 脚本内配方获取：require_recipes 预编译宏
-
-`require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数：MCP 的 `appliedfactory_execute`/`appliedfactory_upload` 在发送前，客户端读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量——行为像预编译宏，控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`，因此**通过控制器 GUI 直接保存的脚本不能使用它**。
+GUI 输入的源码视为位于 `appliedscripts/` 根目录的虚拟脚本文件，因此 `require_recipes()` 的数据文件和其 `include()` 都从该目录计算相对路径。保存的是展开后的源码；原始宏调用不会随控制器程序另行保存。
 
 每个配方条目为 `{id, type, inputs, outputs, json}`：`inputs`/`outputs` 是 `{channel, key, amount}` 资源声明（与 `stack()` 同形），可以直接引用到 `registerProcessingPattern`；`json` 保留原始配方 JSON 作为只读参考。数据文件由 `/appliedfactory export`（或 `setupworkspace`）在本地存档中生成；服务端通用规范化只覆盖**物品**（输出取主产物精确数量），流体、化学品、能量、输入数量 >1 的配方以 `json` 为准。
 
-**有玩家执行时，客户端会用 JEI 重新转储全部配方并合并覆盖 `inputs`/`outputs`**：JEI 的槽位包含 `Recipe#getIngredients()` 之外的输入（如神秘农业 `infusion` 的祭坛基底）、tag/多选槽的全部可选项、以及经 ae2-jei-integration 转换器解析的流体与化学品。服务端的 `id`/`type`/`json` 保持不变，只升级资源声明；没有玩家或客户端没有 JEI 时保留服务端数据。
-
 **输入槽不拍平**：一个输入槽对应配方的一个 ingredient 槽位。tag 或多选材料槽（如 `#minecraft:logs_that_burn`）会保留 `options` 数组（完整 `{channel, key, amount}` 条目，列出该槽接受的全部可选项），`key` 是代表物（第一个可选项，可直接用于注册）；配方只需要其中**任意一个**，不是全部。只有一个可选项时省略 `options`。
-
-**machine 映射不虚构**：服务端先按配方自己声明的机器图标（toast symbol）写 `recipe_types.json`（默认工作台图标视为"未声明"并排除）。有玩家执行导出命令时，还会请求该玩家客户端用 JEI 反查每个配方类型的催化剂（JEI 配方标签页展示的代表机器），合并覆盖到 `recipe_types.json`——所以 AE2 充能器、压印机这类不声明 toast symbol 的模组机器，只要 JEI 注册了催化剂，就会被正确标出；JEI 也没有信息时才不出现在文件中，绝不会错误地标成 `minecraft:crafting_table`。
 
 **过滤器**是对象字面量，字段值可为单个字符串或字符串数组（any-of）：
 
@@ -305,7 +294,7 @@ go(function* () {
 | `machine` | 可处理该配方的机器方块 id（经 `recipe_types.json` 反查其配方类型），如 `"minecraft:furnace"` |
 | `input` / `output` | 任一输入槽的代表物或任一 `option` / 任一输出资源的 `key.id` 精确匹配 |
 
-多个字段为 AND，字段省略表示不限制。过滤出 0 条时展开为 `[]`；`processing_recipes.json` 缺失或过滤器非法（未知字段、非字面量参数）时打包报错并终止本次 execute/upload。
+多个字段为 AND，字段省略表示不限制。过滤出 0 条时展开为 `[]`；`processing_recipes.json` 缺失或过滤器非法（未知字段、非字面量参数）时打包报错并终止本次 execute/upload/GUI 保存。
 
 ```js
 // 配方类型 → 配方
@@ -328,4 +317,10 @@ registerProcessingPattern(
 
 - 展开结果是真实数组，可直接 `filter`/`map`/`find`；
 - `registerProcessingPattern` 的 `inputs`/`outputs` 接受 `stack()`/`item()` 句柄，也接受普通 `{channel, key, amount}` 对象（与 `Recipe.inputs`/`outputs` 同形，可直接引用）；
-- 展开后的源码仍受 32k 程序上限约束，过滤器应尽量收窄到实际需要的配方。
+- 展开后的源码仍受 128k 程序上限约束，过滤器应尽量收窄到实际需要的配方。
+
+## 9.一般数据获取方法
+
+`include(file)` 是**客户端预编译宏**，行为类似 C++ 的 `#include`：无论目标扩展名是什么，调用文本都会被目标文件原文替换。JSON 文件本身可作为表达式使用，所以 `let data = include("data.json");` 合法；一般 JS 文件则推荐直接使用 `include("helper.js");`。
+
+相对路径按包含者所在目录计算。MCP 的内联源码和控制器 GUI 输入都视为 `appliedscripts/` 根目录中的虚拟文件；MCP 的 `file` 源码以该文件所在目录为根；嵌套 `include()` 则以被包含文件所在目录继续解析。若配方过多而不适合直接使用 `require_recipes`，也可先烘焙成较短的数据文件后 `include`。

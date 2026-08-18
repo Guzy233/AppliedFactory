@@ -30,7 +30,7 @@ public record ExecuteMcpCodePayload(
                     NetworkCodecs.UUID, ExecuteMcpCodePayload::requestId,
                     ByteBufCodecs.stringUtf8(64), ExecuteMcpCodePayload::dimension,
                     BlockPos.STREAM_CODEC, ExecuteMcpCodePayload::pos,
-                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_LENGTH),
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
                     ExecuteMcpCodePayload::code,
                     ByteBufCodecs.VAR_INT, ExecuteMcpCodePayload::timeoutTicks,
                     ExecuteMcpCodePayload::new);

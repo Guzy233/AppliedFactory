@@ -35,6 +35,10 @@ public final class NetworkHandler {
                         SaveControllerProgramPayload.STREAM_CODEC,
                         NetworkHandler::handleSaveControllerProgram)
                 .playToServer(
+                        RequestControllerProgramPayload.TYPE,
+                        RequestControllerProgramPayload.STREAM_CODEC,
+                        NetworkHandler::handleRequestControllerProgram)
+                .playToServer(
                         SetControllerLogSubscriptionPayload.TYPE,
                         SetControllerLogSubscriptionPayload.STREAM_CODEC,
                         NetworkHandler::handleSetControllerLogSubscription)
@@ -54,6 +58,10 @@ public final class NetworkHandler {
                         ControllerProgramSaveResultPayload.TYPE,
                         ControllerProgramSaveResultPayload.STREAM_CODEC,
                         NetworkHandler::handleSaveControllerProgramResult)
+                .playToClient(
+                        ControllerProgramContentPayload.TYPE,
+                        ControllerProgramContentPayload.STREAM_CODEC,
+                        NetworkHandler::handleControllerProgramContent)
                 .playToClient(
                         McpCodeResultPayload.TYPE,
                         McpCodeResultPayload.STREAM_CODEC,
@@ -98,6 +106,16 @@ public final class NetworkHandler {
         if (result.successful()) {
             player.containerMenu.broadcastChanges();
         }
+    }
+
+    private static void handleRequestControllerProgram(
+            RequestControllerProgramPayload payload, IPayloadContext context) {
+        var factory = controllerFor(payload.pos(), context);
+        if (factory == null || !(context.player() instanceof ServerPlayer player)) {
+            return;
+        }
+        PacketDistributor.sendToPlayer(player, new ControllerProgramContentPayload(
+                payload.pos(), factory.getControllerProgram()));
     }
 
     private static void handleSetControllerLogSubscription(
@@ -199,6 +217,11 @@ public final class NetworkHandler {
     private static void handleSaveControllerProgramResult(
             ControllerProgramSaveResultPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> ClientControllerProgramPayloadHandler.handleSaveResult(payload));
+    }
+
+    private static void handleControllerProgramContent(
+            ControllerProgramContentPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> ClientControllerProgramPayloadHandler.handleProgramContent(payload));
     }
 
     private static void handleMcpCodeResult(McpCodeResultPayload payload, IPayloadContext context) {

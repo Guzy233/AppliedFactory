@@ -249,10 +249,10 @@ interface RecipeFilter {
 }
 
 /**
- * 客户端预编译宏（仅 MCP 的 appliedfactory_execute / appliedfactory_upload 生效）：
- * 发送前客户端读取 appliedscripts/processing_recipes.json（及 recipe_types.json），
- * 按过滤器选出配方后把整个调用替换为配方数组字面量——表现如同预编译宏，控制器运行时
- * 不存在此函数，GUI 直接保存的脚本不能使用。过滤器没有命中时展开为 []；
- * processing_recipes.json 缺失或过滤器非法时打包报错。
+ * 客户端预编译宏：MCP 的 appliedfactory_execute / appliedfactory_upload 发送前，以及
+ * 控制器 GUI 保存前，客户端读取 appliedscripts/processing_recipes.json（及
+ * recipe_types.json），按过滤器选出配方后把整个调用替换为配方数组字面量。控制器运行时
+ * 不存在此函数；GUI 输入视为 appliedscripts/ 根目录中的虚拟文件。过滤器没有命中时
+ * 展开为 []；processing_recipes.json 缺失或过滤器非法时打包报错。
  */
 declare function require_recipes(filter?: RecipeFilter): readonly Recipe[];

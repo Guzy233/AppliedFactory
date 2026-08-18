@@ -1,6 +1,6 @@
-// require_recipes is a client-side precompile macro: the MCP client replaces
-// the call with the matching recipe literals from processing_recipes.json
-// before the script is sent, so this file can reference baked recipe data.
+// require_recipes is a client-side precompile macro. The client replaces the
+// call with matching recipe literals from processing_recipes.json before an
+// MCP script is sent or a controller GUI script is saved.
 const ironSmelt = require_recipes({
   type: "minecraft:smelting",
   output: "minecraft:iron_ingot",

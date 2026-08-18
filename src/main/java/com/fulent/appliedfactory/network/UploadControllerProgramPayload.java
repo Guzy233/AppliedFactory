@@ -25,7 +25,7 @@ public record UploadControllerProgramPayload(
                     NetworkCodecs.UUID, UploadControllerProgramPayload::requestId,
                     ByteBufCodecs.stringUtf8(64), UploadControllerProgramPayload::dimension,
                     BlockPos.STREAM_CODEC, UploadControllerProgramPayload::pos,
-                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_LENGTH * 3),
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
                     UploadControllerProgramPayload::source,
                     UploadControllerProgramPayload::new);
 

@@ -1,6 +1,7 @@
 package com.fulent.appliedfactory.client;
 
 import com.fulent.appliedfactory.network.ControllerProgramSaveResultPayload;
+import com.fulent.appliedfactory.network.ControllerProgramContentPayload;
 
 import net.minecraft.client.Minecraft;
 
@@ -12,6 +13,12 @@ public final class ClientControllerProgramPayloadHandler {
     public static void handleSaveResult(ControllerProgramSaveResultPayload payload) {
         if (Minecraft.getInstance().screen instanceof FactoryControllerProgramScreen editor) {
             editor.showSaveResult(payload);
+        }
+    }
+
+    public static void handleProgramContent(ControllerProgramContentPayload payload) {
+        if (Minecraft.getInstance().screen instanceof FactoryControllerProgramScreen editor) {
+            editor.showProgramContent(payload);
         }
     }
 }

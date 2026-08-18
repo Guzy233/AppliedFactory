@@ -1,8 +1,12 @@
 package com.fulent.appliedfactory.client;
 
 import com.fulent.appliedfactory.mcp.McpClientManager;
+import com.fulent.appliedfactory.mcp.McpToolException;
+import com.fulent.appliedfactory.mcp.ScriptBundler;
+import com.fulent.appliedfactory.network.ControllerProgramContentPayload;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
 import com.fulent.appliedfactory.network.ControllerProgramSaveResultPayload;
+import com.fulent.appliedfactory.network.RequestControllerProgramPayload;
 import com.fulent.appliedfactory.network.SaveControllerProgramPayload;
 import com.fulent.appliedfactory.network.SetControllerLogSubscriptionPayload;
 import com.fulent.appliedfactory.script.ControllerProgram;
@@ -28,7 +32,9 @@ public final class FactoryControllerProgramScreen
 
     private MultiLineEditBox scriptBox;
     private Checkbox logSubscription;
+    private Button saveButton;
     private Button mcpButton;
+    private boolean sourceLoaded;
     private final UUID viewerId;
     private Component saveStatus = Component.empty();
     private int saveStatusColor = 0xffa9d8e9;
@@ -62,10 +68,17 @@ public final class FactoryControllerProgramScreen
         scriptBox.setValue(currentSource);
         addRenderableWidget(scriptBox);
 
-        addRenderableWidget(Button.builder(
+        if (!sourceLoaded) {
+            PacketDistributor.sendToServer(new RequestControllerProgramPayload(menu.getBlockPos()));
+            saveStatus = Component.translatable("gui.appliedfactory.loading_program");
+            saveStatusColor = 0xffffd37a;
+        }
+
+        saveButton = addRenderableWidget(Button.builder(
                 Component.translatable("gui.appliedfactory.save"), ignored -> saveProgram())
                 .bounds(leftPos + imageWidth - 62, topPos + 5, 56, 18)
                 .build());
+        saveButton.active = sourceLoaded;
 
         mcpButton = addRenderableWidget(Button.builder(
                         Component.translatable("gui.appliedfactory.bind_mcp"),
@@ -83,10 +96,24 @@ public final class FactoryControllerProgramScreen
     }
 
     private void saveProgram() {
+        final String bundled;
+        try {
+            bundled = ScriptBundler.bundleFromWorkspaceRoot(scriptBox.getValue());
+        } catch (McpToolException exception) {
+            saveStatus = Component.translatable("gui.appliedfactory.precompile_error", exception.getMessage());
+            saveStatusColor = 0xffff7d7d;
+            return;
+        }
+        if (!ControllerProgram.isWithinLimit(bundled)) {
+            saveStatus = Component.translatable(
+                    "gui.appliedfactory.source_too_long", ControllerProgram.MAX_SOURCE_LENGTH);
+            saveStatusColor = 0xffff7d7d;
+            return;
+        }
         saveStatus = Component.translatable("gui.appliedfactory.saving");
         saveStatusColor = 0xffffd37a;
         PacketDistributor.sendToServer(new SaveControllerProgramPayload(
-                menu.getBlockPos(), scriptBox.getValue()));
+                menu.getBlockPos(), bundled));
     }
 
     private boolean boundHere() {
@@ -119,6 +146,19 @@ public final class FactoryControllerProgramScreen
                     "gui.appliedfactory.syntax_error", payload.message());
             saveStatusColor = 0xffff7d7d;
         }
+    }
+
+    /** Receives source on demand so large programs never travel in block-entity update NBT. */
+    public void showProgramContent(ControllerProgramContentPayload payload) {
+        if (!menu.getBlockPos().equals(payload.pos()) || scriptBox == null) {
+            return;
+        }
+        sourceLoaded = true;
+        scriptBox.setValue(payload.source());
+        if (saveButton != null) {
+            saveButton.active = true;
+        }
+        saveStatus = Component.empty();
     }
 
     @Override

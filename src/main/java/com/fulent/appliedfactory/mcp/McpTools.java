@@ -26,6 +26,7 @@ import com.google.gson.JsonPrimitive;
 import com.google.gson.JsonSyntaxException;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.resources.language.I18n;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 /** MCP tool schemas and call handlers backed by the client-to-server payload relay. */
@@ -69,7 +70,7 @@ public final class McpTools {
 
     private JsonObject execute(JsonObject arguments) throws McpToolException {
         var code = scriptSource(arguments, "code");
-        if (code.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
+        if (!ControllerProgram.isWithinLimit(code)) {
             throw new McpToolException(-32602,
                     "code too long (max " + ControllerProgram.MAX_SOURCE_LENGTH + " chars)");
         }
@@ -155,7 +156,7 @@ public final class McpTools {
 
     private JsonObject upload(JsonObject arguments) throws McpToolException {
         var source = scriptSource(arguments, "source");
-        if (source.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
+        if (!ControllerProgram.isWithinLimit(source)) {
             throw new McpToolException(-32602,
                     "source too long (max " + ControllerProgram.MAX_SOURCE_LENGTH + " chars)");
         }
@@ -205,7 +206,7 @@ public final class McpTools {
         var binding = McpClientManager.get().binding();
         inner.addProperty("connected", mc.getConnection() != null);
         inner.addProperty("singlePlayer", mc.isSingleplayer());
-        inner.addProperty("workspace", workspaceDir().toString());
+        inner.addProperty("workspace", ScriptBundler.workspaceDir().toString());
         if (binding != null) {
             inner.addProperty("bound", true);
             inner.addProperty("dimension", binding.dimension());
@@ -218,20 +219,11 @@ public final class McpTools {
     }
 
     /**
-     * The appliedscripts workspace next to the game directory — where
-     * {@code /appliedfactory setupworkspace} exports the recipe reference and
-     * where script files referenced by the {@code file} tool argument are read.
-     */
-    private static Path workspaceDir() {
-        return Minecraft.getInstance().gameDirectory.toPath().resolve("appliedscripts");
-    }
-
-    /**
      * Script source for execute/upload: a {@code file} argument (filename
      * relative to the appliedscripts workspace) takes precedence over the inline
      * {@code inlineName} argument, so long scripts with baked recipes can live in
-     * files instead of the tool call. Top-level {@code include("file.js")} calls
-     * are resolved against the workspace before sending, and
+     * files instead of the tool call. {@code include("file")} calls are resolved
+     * as textual substitutions against the workspace before sending, and
      * {@code require_recipes(filter)} calls are expanded to recipe literals.
      */
     private static String scriptSource(JsonObject arguments, String inlineName)
@@ -246,11 +238,11 @@ public final class McpTools {
             }
             bundled = ScriptBundler.bundle(readFile(path, file), path.getParent());
         } else if (arguments.has(inlineName)) {
-            bundled = ScriptBundler.bundle(arguments.get(inlineName).getAsString(), null);
+            bundled = ScriptBundler.bundleFromWorkspaceRoot(arguments.get(inlineName).getAsString());
         } else {
             throw new McpToolException(-32602, inlineName + " (inline) or file is required");
         }
-        if (bundled.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
+        if (!ControllerProgram.isWithinLimit(bundled)) {
             throw new McpToolException(-32602, "bundled source exceeds "
                     + ControllerProgram.MAX_SOURCE_LENGTH + " chars after include()/require_recipes()"
                     + " expansion; narrow the require_recipes filters (or trim include()s)");
@@ -261,7 +253,7 @@ public final class McpTools {
     private static String readFile(Path path, String name) throws McpToolException {
         try {
             var source = Files.readString(path, StandardCharsets.UTF_8);
-            if (source.length() > ControllerProgram.MAX_SOURCE_LENGTH) {
+            if (!ControllerProgram.isWithinLimit(source)) {
                 throw new McpToolException(-32602, "script file too long (max "
                         + ControllerProgram.MAX_SOURCE_LENGTH + " chars): " + name);
             }
@@ -276,67 +268,34 @@ public final class McpTools {
         var properties = new JsonObject();
         var file = new JsonObject();
         file.addProperty("type", "string");
-        file.addProperty("description",
-                "Script filename relative to the appliedscripts workspace (e.g. \"probe1.js\");"
-                        + " the file content is executed as the script. Prefer this over inline"
-                        + " 'code' for long scripts (e.g. batches with baked recipe globals).");
+        file.addProperty("description", text("mcp.appliedfactory.prompt.execute.file"));
         properties.add("file", file);
         var code = new JsonObject();
         code.addProperty("type", "string");
-        code.addProperty("description",
-                "Factory script (Rhino ES6), either inline here or as a file via 'file'."
-                        + " Same API as a controller program: network(side),"
-                        + " buses/target, extract(), storage(), item(), stack(), log(), sleep(),"
-                        + " go(function*(){...}) with yield resource.to(target) /"
-                        + " pushExactlyInto(target). go() generators run as ordinary passive"
-                        + " jobs: transfers wait on resources/capacity, sleep crosses real ticks."
-                        + " require_recipes({type|machine|input|output|id}) is a client-side"
-                        + " macro: the client expands it from appliedscripts/processing_recipes.json"
-                        + " before sending, so the baked recipe literals can be referenced by"
-                        + " registerProcessingPattern directly."
-                        + " The value of the last expression is returned as 'result'."
-                        + " log()/console.log() output is returned in 'logs' directly.");
+        code.addProperty("description", text("mcp.appliedfactory.prompt.execute.code"));
         properties.add("code", code);
         var timeout = new JsonObject();
         timeout.addProperty("type", "integer");
-        timeout.addProperty("description",
-                "Max ticks to wait for all go() generators to finish. 0 = evaluate only"
-                        + " (generators not started), -1/omitted = wait until completion"
-                        + " (hard ceiling 1 hour). 20 ticks = 1 second.");
+        timeout.addProperty("description", text("mcp.appliedfactory.prompt.execute.timeout"));
         properties.add("timeoutTicks", timeout);
-        return tool("appliedfactory_execute",
-                "Runs a probe program against the bound controller and returns its logs."
-                        + " Pass the script inline as 'code', or write it to a file in the"
-                        + " appliedscripts workspace and pass the filename as 'file'.",
-                properties);
+        return tool("appliedfactory_execute", text("mcp.appliedfactory.prompt.execute.tool"), properties);
     }
 
     private JsonObject uploadSchema() {
         var properties = new JsonObject();
         var file = new JsonObject();
         file.addProperty("type", "string");
-        file.addProperty("description",
-                "Program filename relative to the appliedscripts workspace (e.g. \"production.js\");"
-                        + " the file content is uploaded. Prefer this over inline 'source' for"
-                        + " long programs with baked recipe globals.");
+        file.addProperty("description", text("mcp.appliedfactory.prompt.upload.file"));
         properties.add("file", file);
         var source = new JsonObject();
         source.addProperty("type", "string");
-        source.addProperty("description",
-                "Full controller program source, either inline here or as a file via 'file'."
-                        + " Compiles first; on failure the existing"
-                        + " production program is left untouched. Same semantics as saving"
-                        + " in the controller GUI.");
+        source.addProperty("description", text("mcp.appliedfactory.prompt.upload.source"));
         properties.add("source", source);
-        return tool("appliedfactory_upload",
-                "Replaces the bound controller's production program. Prefer testing with"
-                        + " appliedfactory_execute before uploading.",
-                properties);
+        return tool("appliedfactory_upload", text("mcp.appliedfactory.prompt.upload.tool"), properties);
     }
 
     private JsonObject statusSchema() {
-        return tool("appliedfactory_status",
-                "Read-only status of the connection and the bound controller.",
+        return tool("appliedfactory_status", text("mcp.appliedfactory.prompt.status.tool"),
                 new JsonObject());
     }
 
@@ -371,5 +330,10 @@ public final class McpTools {
             result.addProperty("isError", true);
         }
         return result;
+    }
+
+    /** MCP is client-side, so tool descriptions follow the active Minecraft resource-pack language. */
+    private static String text(String key, Object... args) {
+        return I18n.get(key, args);
     }
 }

@@ -60,8 +60,8 @@ import appeng.api.stacks.AEKeyTypes;
  * infusion altar ingredient), fluids and chemicals — is merged over the
  * server-side data by recipe id. The exported {@code processing_recipes.json}
  * is the data source for the client-side {@code require_recipes(filter)}
- * macro: MCP scripts select the recipes they need with a filter and the client
- * bakes the matching entries into the script before sending it.
+ * macro: client-authored scripts select the recipes they need with a filter and
+ * the client bakes the matching entries into the script before sending or saving it.
  *
  * <p>Both commands require permission level 2 (ops/cheats) because they write
  * files into the server directory. Only the exported files are written or
@@ -170,7 +170,7 @@ public final class ExportCommand {
     /**
      * Writes the server-side recipe normalization into
      * {@code processing_recipes.json}; the file is the data source the client
-     * uses to expand {@code require_recipes()} macros in MCP scripts. When a
+     * uses to expand {@code require_recipes()} macros in client-authored scripts. When a
      * player executed the command, that player's client is asked to re-dump
      * every recipe through JEI (ae2-jei-integration converters), and
      * {@link RecipeDumpManager} upgrades the file's inputs/outputs with the

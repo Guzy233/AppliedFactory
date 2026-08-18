@@ -36,13 +36,14 @@ import com.google.gson.JsonParseException;
  *
  * <pre>{@code const smelt = require_recipes({ type: "minecraft:smelting" });}</pre>
  *
- * Before an MCP {@code execute}/{@code upload} is sent, the client reads
- * {@code processing_recipes.json} (and {@code recipe_types.json} when a
- * {@code machine} filter is used) from the appliedscripts workspace and
- * replaces every {@code require_recipes(...)} call with a JSON array literal
- * of the matching recipe entries — the call behaves like a precompiled macro
- * and never reaches the controller runtime. A filter that matches nothing
- * expands to {@code []}; a missing or malformed data file is a bundling error.
+ * Before MCP {@code execute}/{@code upload} is sent or the controller editor
+ * saves, the client reads {@code processing_recipes.json} (and
+ * {@code recipe_types.json} when a {@code machine} filter is used) from the
+ * appliedscripts workspace and replaces every {@code require_recipes(...)}
+ * call with a JSON array literal of the matching recipe entries — the call
+ * behaves like a precompiled macro and never reaches the controller runtime.
+ * A filter that matches nothing expands to {@code []}; a missing or malformed
+ * data file is a bundling error.
  *
  * <p>Filter keys (multiple keys AND, a value may be a string or an array of
  * strings meaning any-of):
@@ -67,9 +68,9 @@ public final class RecipeMacroExpander {
     /**
      * Expands every {@code require_recipes(...)} call in {@code source};
      * returns the source unchanged when there are none. {@code baseDir} is the
-     * directory of the file that originally contained the script (may be null
-     * for inline sources); data files are resolved against the appliedscripts
-     * workspace like {@code include()} targets.
+     * directory of the file that originally contained the script. Inline MCP
+     * and editor sources use the appliedscripts workspace root as their virtual
+     * directory; data files are resolved like {@code include()} targets.
      */
     public static String expand(String source, @Nullable Path baseDir) throws McpToolException {
         AstRoot ast;

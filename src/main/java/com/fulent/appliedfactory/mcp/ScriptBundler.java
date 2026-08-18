@@ -12,39 +12,40 @@ import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
+
 import net.minecraft.client.Minecraft;
 
 import org.mozilla.javascript.Parser;
-import org.mozilla.javascript.ast.AstNode;
 import org.mozilla.javascript.ast.AstRoot;
-import org.mozilla.javascript.ast.ExpressionStatement;
 import org.mozilla.javascript.ast.FunctionCall;
 import org.mozilla.javascript.ast.Name;
 import org.mozilla.javascript.ast.StringLiteral;
 
 /**
- * Client-side source bundler for MCP scripts: resolves {@code include("file")}
- * calls by inlining the target file's content, recursively, so long recipe/data
- * files can live separately in the appliedscripts workspace while the controller
- * still receives one source. After inlining, {@code require_recipes(filter)}
- * calls are expanded by {@link RecipeMacroExpander} against the workspace's
+ * Client-side source bundler for MCP scripts and controller-editor saves:
+ * resolves {@code include("file")} calls by textually inlining the target file's
+ * content, recursively, so long recipe/data files can live separately in the
+ * appliedscripts workspace while the controller still receives one source. After
+ * inlining, {@code require_recipes(filter)} calls are expanded by
+ * {@link RecipeMacroExpander} against the workspace's
  * {@code processing_recipes.json}, so baked recipe data is selected by the
  * filter at bundle time instead of in the script.
  *
- * <p>Two forms:
- * <ul>
- * <li>{@code include("file.json")} — the call is replaced by the file's raw
- * content, which (JSON being a valid JS expression) can be assigned:
- * {@code const recipes = include("seed_recipes.json")}.</li>
- * <li>{@code include("file.js")} — must be a top-level statement; the whole
- * statement is replaced by the file content, so top-level declarations
- * (const/var/function) become visible to the rest of the program.</li>
- * </ul>
+ * <p>{@code include("file")} has one extension-independent meaning, matching C++
+ * {@code #include}: the call itself is replaced with the target's raw text. The caller is
+ * responsible for putting the include where that text is valid JavaScript or data.
  */
 public final class ScriptBundler {
     private static final int MAX_DEPTH = 16;
 
     private ScriptBundler() {
+    }
+
+    /** Root directory of client-authored scripts and generated recipe data. */
+    public static Path workspaceDir() {
+        return Minecraft.getInstance().gameDirectory.toPath().resolve("appliedscripts");
     }
 
     /**
@@ -64,7 +65,7 @@ public final class ScriptBundler {
             candidates.add(baseDir.resolve(file));
         }
         var gameDir = Minecraft.getInstance().gameDirectory.toPath();
-        candidates.add(gameDir.resolve("appliedscripts").resolve(file));
+        candidates.add(workspaceDir().resolve(file));
         candidates.add(gameDir.resolve(file));
         var cwd = Path.of("").toAbsolutePath();
         candidates.add(cwd.resolve("appliedscripts").resolve(file));
@@ -82,6 +83,14 @@ public final class ScriptBundler {
         return RecipeMacroExpander.expand(bundle(source, baseDir, new HashSet<>(), 0), baseDir);
     }
 
+    /**
+     * Bundles inline source as a virtual file located in the appliedscripts
+     * workspace root. Used by MCP inline scripts and the controller editor.
+     */
+    public static String bundleFromWorkspaceRoot(String source) throws McpToolException {
+        return bundle(source, workspaceDir());
+    }
+
     private static String bundle(
             String source, @Nullable Path baseDir, Set<String> chain, int depth)
             throws McpToolException {
@@ -95,7 +104,6 @@ public final class ScriptBundler {
             throw new McpToolException(-32602, "script parse failed: " + exception.getMessage());
         }
         var includes = new ArrayList<Include>();
-        var root = ast;
         ast.visitAll(node -> {
             if (node instanceof FunctionCall call
                     && call.getTarget() instanceof Name name
@@ -103,29 +111,11 @@ public final class ScriptBundler {
                     && call.getArguments().size() == 1
                     && call.getArguments().get(0) instanceof StringLiteral literal) {
                 var target = literal.getValue();
-                if (target.endsWith(".json")) {
-                    // Expression position: replace just the call so the JSON can
-                    // be assigned (JSON is a valid JS expression).
-                    includes.add(new Include(
-                            call.getAbsolutePosition(), call.getLength(), target, true));
-                } else if (node.getParent() instanceof ExpressionStatement statement
-                        && statement.getParent() == root) {
-                    // Top-level statement position: inline declarations.
-                    includes.add(new Include(
-                            statement.getAbsolutePosition(), statement.getLength(), target, false));
-                } else {
-                    includes.add(new Include(-1, -1, target, false));
-                }
+                includes.add(new Include(
+                        call.getAbsolutePosition(), call.getLength(), target));
             }
             return true;
         });
-        for (var include : includes) {
-            if (include.offset() < 0) {
-                throw new McpToolException(-32602, "include() of \"" + include.target()
-                        + "\" must be a top-level statement; only .json includes can be used "
-                        + "as expressions");
-            }
-        }
         if (includes.isEmpty()) {
             return source;
         }
@@ -137,7 +127,7 @@ public final class ScriptBundler {
                 throw new McpToolException(-32602, "overlapping include() statements");
             }
             result.append(source, cursor, include.offset());
-            result.append(load(include.target(), baseDir, chain, depth, include.json()));
+            result.append(load(include.target(), baseDir, chain, depth));
             cursor = include.offset() + include.length();
         }
         result.append(source, cursor, source.length());
@@ -145,7 +135,7 @@ public final class ScriptBundler {
     }
 
     private static String load(
-            String name, @Nullable Path baseDir, Set<String> chain, int depth, boolean json)
+            String name, @Nullable Path baseDir, Set<String> chain, int depth)
             throws McpToolException {
         var path = resolveFile(name, baseDir);
         if (path == null) {
@@ -159,21 +149,32 @@ public final class ScriptBundler {
             throw new McpToolException(-32602,
                     "failed to read include " + name + ": " + exception.getMessage());
         }
-        if (json) {
-            // JSON is data, not a script: inline it verbatim without recursing.
-            return content;
-        }
         var key = path.toAbsolutePath().normalize().toString();
         if (!chain.add(key)) {
             throw new McpToolException(-32602, "include cycle: " + name);
         }
         try {
+            // A JSON object is not a standalone JavaScript program, but textual inclusion
+            // still makes it valid when the call occurs in an expression. JSON cannot carry
+            // another include directive, so it needs no recursive pass.
+            if (isJsonDocument(content)) {
+                return content;
+            }
             return bundle(content, path.getParent(), chain, depth + 1);
         } finally {
             chain.remove(key);
         }
     }
 
-    private record Include(int offset, int length, String target, boolean json) {
+    private static boolean isJsonDocument(String content) {
+        try {
+            JsonParser.parseString(content);
+            return true;
+        } catch (JsonSyntaxException ignored) {
+            return false;
+        }
+    }
+
+    private record Include(int offset, int length, String target) {
     }
 }

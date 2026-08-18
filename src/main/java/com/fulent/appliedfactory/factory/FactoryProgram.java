@@ -12,6 +12,7 @@ import org.jetbrains.annotations.Nullable;
 
 import com.fulent.appliedfactory.AppliedFactory;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
+import com.fulent.appliedfactory.script.ControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgramCompiler;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
 import com.fulent.appliedfactory.script.ScriptExecutionContext;
@@ -135,6 +136,11 @@ public final class FactoryProgram {
             String source,
             Host host,
             @Nullable ScriptExecutionContext topLevelContext) {
+        if (!ControllerProgram.isWithinLimit(source)) {
+            return ProgramLoadResult.failure(
+                    "Factory program exceeds the " + ControllerProgram.MAX_SOURCE_LENGTH
+                            + " character source limit");
+        }
         var runtime = ControllerProgramCompiler.createRuntime(host);
         var result = runtime.loadProgram(source, topLevelContext);
         if (!result.successful()) {

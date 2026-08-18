@@ -27,6 +27,7 @@ import com.fulent.appliedfactory.factory.FactoryTransferResult;
 import com.fulent.appliedfactory.part.FactoryBusPart;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgram;
+import com.fulent.appliedfactory.script.ControllerProgramStore;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
 
@@ -92,6 +93,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     private List<OfferedPattern> offeredPatterns = List.of();
     private String controllerProgram = ControllerProgram.DEFAULT_SOURCE;
+    /** UUID reference into the world-level ControllerProgramStore; never carries source in chunk NBT. */
+    private UUID controllerProgramId;
     private boolean patternsDirty = true;
     /**
      * The compiled program revision for {@link #controllerProgram}, owning all suspended jobs.
@@ -158,9 +161,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                         ? tag.getCompound(ESCROW_NBT_KEY)
                         : new CompoundTag(),
                 registries);
-        controllerProgram = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
-                ? tag.getString(ControllerProgram.NBT_KEY)
-                : ControllerProgram.DEFAULT_SOURCE;
+        controllerProgram = loadControllerProgram(tag);
         logSubscribers.clear();
         reportedScriptFailures.clear();
         var savedSubscribers = tag.getList(ERROR_SUBSCRIBERS_NBT_KEY, Tag.TAG_COMPOUND);
@@ -170,8 +171,13 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 logSubscribers.add(subscriber.getUUID(ERROR_SUBSCRIBER_ID_NBT_KEY));
             }
         }
-        program = createProgram(controllerProgram);
-        programInitialized = true;
+        if (level == null || !level.isClientSide) {
+            program = createProgram(controllerProgram);
+            programInitialized = true;
+        } else {
+            program = null;
+            programInitialized = false;
+        }
         networkNodes.values().forEach(node -> node.loadFromNBT(tag));
         invalidatePatterns();
     }
@@ -179,7 +185,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     @Override
     protected void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
         tag.put(ESCROW_NBT_KEY, escrow.save(registries));
-        tag.putString(ControllerProgram.NBT_KEY, controllerProgram);
+        ensureControllerProgramStored();
+        if (controllerProgramId != null) {
+            tag.putUUID(ControllerProgram.PROGRAM_ID_NBT_KEY, controllerProgramId);
+        }
         var savedSubscribers = new ListTag();
         for (var subscriber : logSubscribers) {
             var subscriberTag = new CompoundTag();
@@ -259,11 +268,17 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      * recovered by the replacement on its next tick.
      */
     public ProgramLoadResult<FactoryProgram> updateControllerProgram(String source) {
+        if (!ControllerProgram.isWithinLimit(source)) {
+            return ProgramLoadResult.failure(
+                    "Factory program exceeds the " + ControllerProgram.MAX_SOURCE_LENGTH
+                            + " character source limit");
+        }
         var result = FactoryProgram.replace(program, source, this);
         if (!result.successful()) {
             return result;
         }
         controllerProgram = source;
+        ensureControllerProgramStored();
         program = result.program();
         programInitialized = true;
         reportedScriptFailures.clear();
@@ -279,6 +294,52 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             return null;
         }
         return result.program();
+    }
+
+    /**
+     * Reads the compact program reference, migrating the old chunk-NBT string once on the
+     * server. Clients deliberately keep no copy: the editor requests source only while open.
+     */
+    private String loadControllerProgram(CompoundTag tag) {
+        controllerProgramId = tag.hasUUID(ControllerProgram.PROGRAM_ID_NBT_KEY)
+                ? tag.getUUID(ControllerProgram.PROGRAM_ID_NBT_KEY) : null;
+        var legacySource = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
+                ? tag.getString(ControllerProgram.NBT_KEY)
+                : ControllerProgram.DEFAULT_SOURCE;
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return ControllerProgram.DEFAULT_SOURCE;
+        }
+        var store = ControllerProgramStore.get(serverLevel);
+        if (controllerProgramId != null) {
+            var storedSource = store.get(controllerProgramId);
+            if (storedSource.isPresent()) {
+                return storedSource.get();
+            }
+        } else {
+            controllerProgramId = UUID.randomUUID();
+        }
+        // Either this is a legacy controller or its SavedData entry was lost. Preserve the
+        // legacy value when possible, then self-heal the world-level record.
+        var source = ControllerProgram.isWithinLimit(legacySource)
+                ? legacySource : ControllerProgram.DEFAULT_SOURCE;
+        store.put(controllerProgramId, source);
+        return source;
+    }
+
+    private void ensureControllerProgramStored() {
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        if (controllerProgramId == null) {
+            controllerProgramId = UUID.randomUUID();
+        }
+        ControllerProgramStore.get(serverLevel).put(controllerProgramId, controllerProgram);
+    }
+
+    private void removeStoredControllerProgram() {
+        if (controllerProgramId != null && level instanceof ServerLevel serverLevel) {
+            ControllerProgramStore.get(serverLevel).remove(controllerProgramId);
+        }
     }
 
     private List<IPatternDetails> availablePatterns(Direction side) {
@@ -782,6 +843,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         if (program != null) {
             program.discard();
         }
+        removeStoredControllerProgram();
         setChanged();
     }
 
