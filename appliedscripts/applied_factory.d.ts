@@ -7,6 +7,8 @@
  */
 
 type Direction = "up" | "down" | "north" | "south" | "west" | "east";
+type RelativeDirection = "front" | "back" | "left" | "right";
+type NetworkSide = Direction | RelativeDirection;
 type NbtValue =
   | string
   | number
@@ -137,6 +139,7 @@ interface Bus {
 }
 
 interface Network {
+  /** 解析后的世界绝对方向；相对选择器不会保留在此字段中。 */
   readonly side: Direction;
   readonly online: boolean;
   /** 当前拓扑快照，每次读取都重新枚举。 */
@@ -144,6 +147,8 @@ interface Network {
 
   /** 拓扑变化时同步调用 */
   onChange(callback: () => void): void;
+  /** 实时判断两个控制器面是否连接同一个 AE 网格；未连接面返回 false。 */
+  isSameNetwork(other: Network): boolean;
   /**
    * 统一查询：extract(channel?, key?, amount?)，三个参数都可选，恒返回 ResourceArray。
    * 没有满足条件的资源时返回空数组，绝不返回 null。
@@ -164,14 +169,14 @@ interface Network {
 type ResourceTarget = Network | Bus;
 
 interface PatternDefinition {
-  readonly orderNetwork: Direction;
+  readonly orderNetwork: NetworkSide;
   /** stack()/item() 句柄，或普通 {channel, key, amount} 对象（Recipe.inputs/Recipe.outputs 同形，可直接引用）。 */
   readonly inputs: readonly ResourceSpec[];
   readonly outputs: readonly ResourceSpec[];
 }
 
-/** 获取控制器对应面上的网络 */
-declare function network(side: Direction): Network;
+/** 获取控制器对应面上的网络；front/back/left/right 相对于控制器正面。 */
+declare function network(side: NetworkSide): Network;
 /** 获得一个SleepAction，可用于yield等待若干刻 */
 declare function sleep(ticks: number): SleepAction;
 

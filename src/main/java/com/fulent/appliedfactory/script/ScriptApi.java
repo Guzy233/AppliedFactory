@@ -430,6 +430,21 @@ final class ScriptApi {
         return side;
     }
 
+    Direction networkSide(String value) {
+        var absolute = Direction.byName(value);
+        if (absolute != null) {
+            return absolute;
+        }
+        var front = host.controllerFacing();
+        return switch (value) {
+            case "front" -> front;
+            case "back" -> front.getOpposite();
+            case "left" -> front.getCounterClockWise();
+            case "right" -> front.getClockWise();
+            default -> throw Context.reportRuntimeError("Invalid network side: " + value);
+        };
+    }
+
     static Object required(Scriptable object, String name) {
         var value = ScriptableObject.getProperty(object, name);
         if (value == Scriptable.NOT_FOUND || value == Undefined.instance) {
@@ -447,7 +462,7 @@ final class JsGlobals {    private final ScriptApi api;
     }
 
     public JsNetwork network(String side) {
-        return new JsNetwork(api, ScriptApi.direction(side));
+        return new JsNetwork(api, api.networkSide(side));
     }
 
     public JsSleepAction sleep(int ticks) {
@@ -472,7 +487,7 @@ final class JsGlobals {    private final ScriptApi api;
             if (!(value instanceof Scriptable definition)) {
                 throw Context.reportRuntimeError("Pattern definition must be an object");
             }
-            var side = ScriptApi.direction(Context.toString(
+            var side = api.networkSide(Context.toString(
                     ScriptApi.required(definition, "orderNetwork")));
             var inputs = specs(ScriptApi.required(definition, "inputs"), "inputs");
             var outputs = specs(ScriptApi.required(definition, "outputs"), "outputs");
@@ -673,6 +688,11 @@ final class JsNetwork {
     public Object onChange(Function callback) {
         api.addTopologyListener(side, callback);
         return Undefined.instance;
+    }
+
+    /** Compares the live AE grid objects; disconnected sides never compare equal. */
+    public boolean isSameNetwork(JsNetwork other) {
+        return api.host().isSameNetwork(side, other.side);
     }
 
     public Object extract(Object channel, Object key, Object amount) {

@@ -76,6 +76,16 @@ public final class McpProbeHost implements FactoryProgram.Host {
     }
 
     @Override
+    public Direction controllerFacing() {
+        return controller.controllerFacing();
+    }
+
+    @Override
+    public boolean isSameNetwork(Direction first, Direction second) {
+        return controller.isSameNetwork(first, second);
+    }
+
+    @Override
     public Optional<FactoryBusTarget> busTarget(FactoryBusAddress address) {
         return controller.busTarget(address);
     }

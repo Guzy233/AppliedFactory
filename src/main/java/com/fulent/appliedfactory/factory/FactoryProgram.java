@@ -38,6 +38,12 @@ public final class FactoryProgram {
 
         Set<Direction> onlineNetworks();
 
+        /** Horizontal visual front used to resolve front/back/left/right script selectors. */
+        Direction controllerFacing();
+
+        /** True when both physical controller sides currently belong to the same AE grid. */
+        boolean isSameNetwork(Direction first, Direction second);
+
         Optional<FactoryBusTarget> busTarget(FactoryBusAddress address);
 
         List<FactoryResource> availableResources(FactoryEndpoint endpoint);

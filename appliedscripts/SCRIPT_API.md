@@ -7,7 +7,7 @@
 控制器脚本使用 Rhino ES6 编译模式。脚本在控制器加载时求值一次，用全局函数取得句柄、注册 processing pattern，并启动 generator workflow。
 
 ```js
-const production = network("south");
+const production = network("front");
 
 registerProcessingPattern(
     [{
@@ -46,6 +46,20 @@ Bus 句柄只绑定总线地址，不保存目标机器身份：
 若脚本缓存依赖目标机器类型，玩家可以重新上传脚本，或在 `network.onChange` 回调中重新枚举 `network.buses`。
 
 `network.buses` 每次读取均返回当前拓扑快照。`onChange` 只在工厂总线加入或离开 AE 网络时调用，不会因目标方块的一般更新而触发。该回调同步且不可挂起；回调中可以重建脚本保存的句柄数组，但不能 `yield`。
+
+`network(side)` 同时接受世界绝对方向 `up/down/north/south/west/east` 和相对控制器正面的 `front/back/left/right`。`front` 是控制器方块的 `facing`，`back` 是反向；从俯视角按控制器自身朝向计算，`left` 为逆时针、`right` 为顺时针。相对方向在取得句柄时解析为绝对面，因此 `network("front").side` 返回实际世界方向。`PatternDefinition.orderNetwork` 也接受同一组相对选择器。
+
+不要用 `===` 比较两个 `Network` 句柄，因为每次 `network()` 都会创建新的 JavaScript 包装对象。使用实时网格比较：
+
+```js
+const inputs = network("left");
+const outputs = network("right");
+if (inputs.isSameNetwork(outputs)) {
+    log("left and right currently share one AE grid");
+}
+```
+
+`isSameNetwork` 直接比较 AE 当前的网格对象；任一面没有连接网格时返回 `false`，两个未连接面不会被误判为相同。网格合并或拆分后结果会立即随拓扑变化。
 
 `bus.channels` 返回目标面当前支持输入/输出的资源 channel id 数组（如 `"ae2:i"`、`"ae2:f"`），**不依赖目标是否实际含有资源**：它反映该面对每个已注册 AE channel 是否暴露了能力（如熔炉顶面能放输入、底面能取产物），通过 AE2 的策略注册表查询，覆盖任意扩展 channel，包括但不限于能源、化学品等通道。
 

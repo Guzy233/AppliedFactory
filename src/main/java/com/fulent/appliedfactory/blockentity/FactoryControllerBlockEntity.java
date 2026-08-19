@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import com.fulent.appliedfactory.AppliedFactory;
+import com.fulent.appliedfactory.block.FactoryControllerBlock;
 import com.fulent.appliedfactory.factory.FactoryActionExecutor;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
@@ -489,6 +490,22 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             }
         }
         return online;
+    }
+
+    @Override
+    public Direction controllerFacing() {
+        return getBlockState().getValue(FactoryControllerBlock.FACING);
+    }
+
+    @Override
+    public boolean isSameNetwork(Direction first, Direction second) {
+        var firstNode = getGridNode(first);
+        var secondNode = getGridNode(second);
+        if (firstNode == null || secondNode == null) {
+            return false;
+        }
+        var firstGrid = firstNode.getGrid();
+        return firstGrid != null && firstGrid == secondNode.getGrid();
     }
 
     @Override
