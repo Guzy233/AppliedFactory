@@ -1,7 +1,19 @@
 {
   "variants": {
-    "": {
+    "facing=north": {
       "model": "appliedfactory:block/factory_controller"
+    },
+    "facing=east": {
+      "model": "appliedfactory:block/factory_controller",
+      "y": 90
+    },
+    "facing=south": {
+      "model": "appliedfactory:block/factory_controller",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "appliedfactory:block/factory_controller",
+      "y": 270
     }
   }
 }

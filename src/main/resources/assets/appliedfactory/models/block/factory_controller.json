@@ -1,6 +1,12 @@
 {
-  "parent": "minecraft:block/cube_all",
+  "parent": "minecraft:block/cube",
   "textures": {
-    "all": "minecraft:block/iron_block"
+    "particle": "appliedfactory:block/factory_controller_casing",
+    "down": "appliedfactory:block/factory_controller_casing",
+    "up": "appliedfactory:block/factory_controller_casing",
+    "north": "appliedfactory:block/factory_controller_front",
+    "south": "appliedfactory:block/factory_controller_casing",
+    "west": "appliedfactory:block/factory_controller_casing",
+    "east": "appliedfactory:block/factory_controller_casing"
   }
 }
