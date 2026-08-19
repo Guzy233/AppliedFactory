@@ -336,20 +336,35 @@ final class ScriptApi {
     }
 
     boolean useItem(
-            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item) {
+            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item, Object rawShift) {
         requireActiveContext("bus.use(item)");
-        if (item == Undefined.instance || item == null) {
-            return host.use(activeContext.workflowId(), bus);
+        var emptyHand = item == Undefined.instance || item == null || item instanceof Boolean;
+        var shift = optionalBoolean(item instanceof Boolean ? item : rawShift, "bus.use shift");
+        if (emptyHand) {
+            return host.use(activeContext.workflowId(), bus, shift);
         }
         return host.use(
-                activeContext.workflowId(), bus, requireItemResource(item));
+                activeContext.workflowId(), bus, requireItemResource(item), shift);
     }
 
     boolean placeItem(
-            com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item) {
+            com.fulent.appliedfactory.factory.FactoryBusAddress bus,
+            Object item,
+            Object rawShift) {
         requireActiveContext("bus.place(item)");
         return host.place(
-                activeContext.workflowId(), bus, requireItemResource(item));
+                activeContext.workflowId(), bus, requireItemResource(item),
+                optionalBoolean(rawShift, "bus.place shift"));
+    }
+
+    private static boolean optionalBoolean(Object value, String name) {
+        if (value == Undefined.instance || value == null) {
+            return false;
+        }
+        if (!(value instanceof Boolean booleanValue)) {
+            throw Context.reportRuntimeError(name + " must be a boolean");
+        }
+        return booleanValue;
     }
 
     Object breakBlock(
@@ -748,12 +763,12 @@ final class JsBus {
         return api.dropItem(address, item);
     }
 
-    public boolean use(Object resource) {
-        return api.useItem(address, resource);
+    public boolean use(Object resource, Object shift) {
+        return api.useItem(address, resource, shift);
     }
 
-    public boolean place(Object resource) {
-        return api.placeItem(address, resource);
+    public boolean place(Object resource, Object shift) {
+        return api.placeItem(address, resource, shift);
     }
 
     /** JS name is {@code break}; the Java name stays breakBlock because break is a keyword. */

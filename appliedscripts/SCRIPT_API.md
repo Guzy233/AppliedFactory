@@ -43,9 +43,9 @@ Bus 句柄只绑定总线地址，不保存目标机器身份：
 - 资源不足或目标已满：Action 等待；
 - 总线本身被拆除：句柄无法解析，Action 等待。
 
-若脚本缓存依赖目标机器类型，玩家可以重新保存脚本，或在 `network.onChange` 回调中重新枚举 `network.buses`。
+若脚本缓存依赖目标机器类型，玩家可以重新上传脚本，或在 `network.onChange` 回调中重新枚举 `network.buses`。
 
-`network.buses` 每次读取均返回当前拓扑快照。`onChange` 注册同步、不可挂起的拓扑变化回调；回调中可以重建脚本保存的句柄数组，但不能 `yield`。
+`network.buses` 每次读取均返回当前拓扑快照。`onChange` 只在工厂总线加入或离开 AE 网络时调用，不会因目标方块的一般更新而触发。该回调同步且不可挂起；回调中可以重建脚本保存的句柄数组，但不能 `yield`。
 
 `bus.channels` 返回目标面当前支持输入/输出的资源 channel id 数组（如 `"ae2:i"`、`"ae2:f"`），**不依赖目标是否实际含有资源**：它反映该面对每个已注册 AE channel 是否暴露了能力（如熔炉顶面能放输入、底面能取产物），通过 AE2 的策略注册表查询，覆盖任意扩展 channel，包括但不限于能源、化学品等通道。
 
@@ -193,11 +193,11 @@ go(function* () {
 
     // 使用一个物品：先尝试右键目标方块，再回退到物品的空中使用。
     // 使用后的剩余物或变换物（例如空桶）直接写回 named.origin。
-    const used = bus.use(named);
+    const used = bus.use(named, true); // 第二个参数表示按住 Shift
 
     // place 运行时要求 amount=1 且 key 是 BlockItem。
     const stone = storage.extract("ae2:i", { id: "minecraft:stone" }, 1);
-    const placed = stone.length > 0 && bus.place(stone[0]);
+    const placed = stone.length > 0 && bus.place(stone[0], false);
 
     // 工具只是来源句柄，不会转移到控制器。耐久和掉落都立刻写回工具来源。
     const tool = storage.extract("ae2:i", { id: "minecraft:diamond_pickaxe" }, 1);
@@ -210,7 +210,7 @@ go(function* () {
     const dropped = cobble.length > 0 && bus.drop(cobble[0]);
 
     // 不传物品时保持空手使用方块的语义。
-    const activated = bus.use();
+    const activated = bus.use(true); // 潜行空手使用
 });
 ```
 
@@ -243,7 +243,7 @@ go(function* () {
 
 `require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数。将脚本上传前，客户端会读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量。控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`。
 
-GUI 输入的源码视为位于 `appliedscripts/` 根目录的虚拟脚本文件，因此 `require_recipes()` 的数据文件和其 `include()` 都从该目录计算相对路径。保存的是展开后的源码；原始宏调用不会随控制器程序另行保存。
+控制器页面从左侧文件管理器选择 `appliedscripts/` 内的本地文件；上传时先保存本地原始源码，再按该文件所在目录解析 `require_recipes()` 和 `include()`。服务器同时保存用于显示/拉取的原始源码和仅用于执行的展开源码。没有本地文件备份时禁止上传。
 
 每个配方条目为 `{id, type, inputs, outputs, json}`：`inputs`/`outputs` 是 `{channel, key, amount}` 资源声明（与 `stack()` 同形），可以直接引用到 `registerProcessingPattern`；`json` 保留原始配方 JSON 作为只读参考。
 

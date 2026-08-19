@@ -121,12 +121,13 @@ interface Bus {
   storage(channel: ResourceChannel): ResourceArray;
   /** 立即尝试精确取走物品并从总线朝向丢出，不进入调度器。 */
   drop(item: Resource): boolean;
-  /** 立即空手使用目标方块；本次未成功时返回 false。 */
+  /** 立即空手使用目标方块；shift 表示潜行使用；本次未成功时返回 false。 */
   use(): boolean;
+  use(shift: boolean): boolean;
   /** 立即使用来源中的一个物品；结果物品直接写回同一来源。 */
-  use(item: Resource): boolean;
+  use(item: Resource, shift?: boolean): boolean;
   /** 立即使用一个 BlockItem 放置方块；剩余物直接写回来源。 */
-  place(block: Resource): boolean;
+  place(block: Resource, shift?: boolean): boolean;
   /** 读取目标方块向总线面输出的红石等级（0-15）；总线或目标不可解析时为 0。 */
   redstone(): number;
   /** 设置总线从物理线缆面向外输出的红石等级（0-15）；总线不可解析时返回 false。 */

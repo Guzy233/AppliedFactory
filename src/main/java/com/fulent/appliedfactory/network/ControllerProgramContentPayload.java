@@ -11,7 +11,7 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 
 /** Server response carrying the source only to the player actively editing the controller. */
-public record ControllerProgramContentPayload(BlockPos pos, String source)
+public record ControllerProgramContentPayload(BlockPos pos, String source, String workspacePath)
         implements CustomPacketPayload {
     public static final Type<ControllerProgramContentPayload> TYPE = new Type<>(
             ResourceLocation.fromNamespaceAndPath(
@@ -22,6 +22,8 @@ public record ControllerProgramContentPayload(BlockPos pos, String source)
                     BlockPos.STREAM_CODEC, ControllerProgramContentPayload::pos,
                     ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
                     ControllerProgramContentPayload::source,
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_WORKSPACE_PATH_BYTES),
+                    ControllerProgramContentPayload::workspacePath,
                     ControllerProgramContentPayload::new);
 
     @Override

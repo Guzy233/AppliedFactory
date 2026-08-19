@@ -148,25 +148,28 @@ public final class FactoryBusTarget {
     // ---- World operations (item-centric) ------------------------------------
 
     /** Uses the target block with an empty-handed MFM fake player. */
-    public boolean use() {
+    public boolean use(boolean shift) {
         var player = interactionPlayer();
         if (player == null) {
             return false;
         }
         var previous = player.getItemInHand(InteractionHand.MAIN_HAND);
+        var previousShift = player.isShiftKeyDown();
         player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        player.setShiftKeyDown(shift);
         try {
             return player.gameMode.useItemOn(
                     player, level, ItemStack.EMPTY, InteractionHand.MAIN_HAND, interactionHit())
                     .consumesAction();
         } finally {
             player.closeContainer();
+            player.setShiftKeyDown(previousShift);
             player.setItemInHand(InteractionHand.MAIN_HAND, previous);
         }
     }
 
     /** Uses one supplied item on the target, falling back to its in-air use. */
-    public ItemUseResult useItem(ItemStack stack) {
+    public ItemUseResult useItem(ItemStack stack, boolean shift) {
         if (!isLoaded() || stack.isEmpty()) {
             return ItemUseResult.failed();
         }
@@ -175,8 +178,10 @@ public final class FactoryBusTarget {
             return ItemUseResult.failed();
         }
         var previous = player.getItemInHand(InteractionHand.MAIN_HAND);
+        var previousShift = player.isShiftKeyDown();
         var held = stack.copyWithCount(1);
         player.setItemInHand(InteractionHand.MAIN_HAND, held);
+        player.setShiftKeyDown(shift);
         try {
             var result = player.gameMode.useItemOn(
                     player, level, held, InteractionHand.MAIN_HAND, interactionHit());
@@ -209,6 +214,7 @@ public final class FactoryBusTarget {
         } finally {
             player.stopUsingItem();
             player.closeContainer();
+            player.setShiftKeyDown(previousShift);
             player.setItemInHand(InteractionHand.MAIN_HAND, previous);
         }
     }
@@ -217,12 +223,12 @@ public final class FactoryBusTarget {
      * Places one block item into an empty target position using the same fake
      * player.
      */
-    public boolean place(ItemStack stack) {
-        return placeAndCollect(stack).successful();
+    public boolean place(ItemStack stack, boolean shift) {
+        return placeAndCollect(stack, shift).successful();
     }
 
     /** Places one block item and returns the possibly transformed held-item remainder. */
-    public ItemUseResult placeAndCollect(ItemStack stack) {
+    public ItemUseResult placeAndCollect(ItemStack stack, boolean shift) {
         if (!isLoaded() || !blockState().isAir() || !(stack.getItem() instanceof BlockItem)) {
             return ItemUseResult.failed();
         }
@@ -231,8 +237,10 @@ public final class FactoryBusTarget {
             return ItemUseResult.failed();
         }
         var previous = player.getItemInHand(InteractionHand.MAIN_HAND);
+        var previousShift = player.isShiftKeyDown();
         var placed = stack.copyWithCount(1);
         player.setItemInHand(InteractionHand.MAIN_HAND, placed);
+        player.setShiftKeyDown(shift);
         try {
             var result = player.gameMode.useItemOn(
                     player, level, placed, InteractionHand.MAIN_HAND, interactionHit())
@@ -244,6 +252,7 @@ public final class FactoryBusTarget {
                             : stack.copyWithCount(1));
         } finally {
             player.closeContainer();
+            player.setShiftKeyDown(previousShift);
             player.setItemInHand(InteractionHand.MAIN_HAND, previous);
         }
     }

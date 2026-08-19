@@ -29,7 +29,7 @@ public final class NetworkHandler {
     }
 
     public static void register(RegisterPayloadHandlersEvent event) {
-        event.registrar("2")
+        event.registrar("3")
                 .playToServer(
                         SaveControllerProgramPayload.TYPE,
                         SaveControllerProgramPayload.STREAM_CODEC,
@@ -99,7 +99,8 @@ public final class NetworkHandler {
             return;
         }
 
-        var result = factory.updateControllerProgram(payload.source());
+        var result = factory.updateControllerProgram(
+                payload.source(), payload.compiledSource(), payload.workspacePath());
         PacketDistributor.sendToPlayer(player, new ControllerProgramSaveResultPayload(
                 payload.pos(), result.successful(),
                 result.successful() ? "" : result.errorMessage()));
@@ -115,7 +116,7 @@ public final class NetworkHandler {
             return;
         }
         PacketDistributor.sendToPlayer(player, new ControllerProgramContentPayload(
-                payload.pos(), factory.getControllerProgram()));
+                payload.pos(), factory.getControllerProgram(), factory.getControllerProgramPath()));
     }
 
     private static void handleSetControllerLogSubscription(
@@ -183,7 +184,8 @@ public final class NetworkHandler {
                     payload.requestId(), false, "controller not loaded or not bound"));
             return;
         }
-        var result = factory.updateControllerProgram(payload.source());
+        var result = factory.updateControllerProgram(
+                payload.source(), payload.compiledSource(), payload.workspacePath());
         PacketDistributor.sendToPlayer(player, new UploadResultPayload(
                 payload.requestId(), result.successful(),
                 result.successful() ? "" : result.errorMessage()));

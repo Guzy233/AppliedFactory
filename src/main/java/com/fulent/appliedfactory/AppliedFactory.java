@@ -8,16 +8,12 @@ import com.fulent.appliedfactory.block.FactoryControllerBlock;
 import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.factory.McpProbeManager;
 import com.fulent.appliedfactory.item.FactoryBusItem;
-import com.fulent.appliedfactory.menu.FactoryBusMenu;
 import com.fulent.appliedfactory.menu.FactoryControllerProgramMenu;
 import com.fulent.appliedfactory.network.NetworkHandler;
 import com.fulent.appliedfactory.part.FactoryBusPart;
 
 import appeng.api.AECapabilities;
-import appeng.api.ids.AEItemIds;
-import appeng.api.upgrades.Upgrades;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.CreativeModeTabs;
 import net.minecraft.world.item.Item;
@@ -31,7 +27,6 @@ import net.neoforged.neoforge.common.extensions.IMenuTypeExtension;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.ModContainer;
-import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.registries.DeferredBlock;
 import net.neoforged.neoforge.registries.DeferredHolder;
@@ -71,10 +66,6 @@ public final class AppliedFactory {
     public static final DeferredHolder<MenuType<?>, MenuType<FactoryControllerProgramMenu>> FACTORY_CONTROLLER_PROGRAM_MENU = MENUS
             .register("factory_controller_program",
                     () -> IMenuTypeExtension.create(FactoryControllerProgramMenu::new));
-// 总线面板
-    public static final DeferredHolder<MenuType<?>, MenuType<FactoryBusMenu>> FACTORY_BUS_MENU = MENUS
-            .register("factory_bus", () -> IMenuTypeExtension.create(FactoryBusMenu::new));
-
     public AppliedFactory(IEventBus modEventBus, ModContainer modContainer) {
         BLOCKS.register(modEventBus);
         ITEMS.register(modEventBus);
@@ -82,7 +73,6 @@ public final class AppliedFactory {
         MENUS.register(modEventBus);
 
         modEventBus.addListener(this::addCreative);
-        modEventBus.addListener(this::commonSetup);
         modEventBus.addListener(this::registerCapabilities);
         
         modEventBus.addListener(NetworkHandler::register);
@@ -92,11 +82,6 @@ public final class AppliedFactory {
         NeoForge.EVENT_BUS.addListener(
                 com.fulent.appliedfactory.command.ExportCommand::register);
         McpProbeManager.register();
-    }
-
-    private void commonSetup(FMLCommonSetupEvent event) {
-        event.enqueueWork(() -> Upgrades.add(BuiltInRegistries.ITEM.get(AEItemIds.SPEED_CARD),
-                FACTORY_BUS_ITEM.get(), FactoryBusPart.UPGRADE_SLOTS));
     }
 
     private void registerCapabilities(RegisterCapabilitiesEvent event) {

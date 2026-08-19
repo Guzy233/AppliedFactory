@@ -14,7 +14,8 @@ import net.minecraft.resources.ResourceLocation;
 
 /** Client-to-server request to replace the bound controller's production program. */
 public record UploadControllerProgramPayload(
-        UUID requestId, String dimension, BlockPos pos, String source)
+        UUID requestId, String dimension, BlockPos pos,
+        String source, String compiledSource, String workspacePath)
         implements CustomPacketPayload {
     public static final Type<UploadControllerProgramPayload> TYPE = new Type<>(
             ResourceLocation.fromNamespaceAndPath(
@@ -27,6 +28,10 @@ public record UploadControllerProgramPayload(
                     BlockPos.STREAM_CODEC, UploadControllerProgramPayload::pos,
                     ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
                     UploadControllerProgramPayload::source,
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
+                    UploadControllerProgramPayload::compiledSource,
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_WORKSPACE_PATH_BYTES),
+                    UploadControllerProgramPayload::workspacePath,
                     UploadControllerProgramPayload::new);
 
     @Override

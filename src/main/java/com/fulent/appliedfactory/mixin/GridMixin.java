@@ -18,7 +18,7 @@ import net.minecraft.nbt.CompoundTag;
  * Turns the per-tick topology fingerprint into an event: every node that joins or leaves a grid
  * flows through {@code Grid.add} / {@code Grid.remove}, so when the node belongs to a
  * {@link FactoryBusPart} the controllers on that grid are told their bus topology changed. Bus
- * target changes are covered separately by {@link FactoryBusPart#onNeighborChanged}.
+ * Target block updates deliberately do not count as topology changes.
  */
 @Mixin(Grid.class)
 public abstract class GridMixin {
@@ -27,7 +27,7 @@ public abstract class GridMixin {
         notifyBusTopologyChanged(gridNode);
     }
 
-    @Inject(method = "remove", at = @At("TAIL"))
+    @Inject(method = "remove", at = @At("HEAD"))
     private void factoryOnBusRemoved(GridNode gridNode, CallbackInfo ci) {
         notifyBusTopologyChanged(gridNode);
     }

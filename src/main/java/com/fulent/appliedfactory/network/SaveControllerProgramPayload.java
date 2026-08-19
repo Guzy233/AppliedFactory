@@ -10,8 +10,10 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 
-/** Client-to-server update for the single program owned by a controller. */
-public record SaveControllerProgramPayload(BlockPos pos, String source) implements CustomPacketPayload {
+/** Client-to-server update carrying editable and preprocessed program forms. */
+public record SaveControllerProgramPayload(
+        BlockPos pos, String source, String compiledSource, String workspacePath)
+        implements CustomPacketPayload {
     public static final Type<SaveControllerProgramPayload> TYPE = new Type<>(
             ResourceLocation.fromNamespaceAndPath(AppliedFactory.MOD_ID, "save_controller_program"));
 
@@ -20,6 +22,10 @@ public record SaveControllerProgramPayload(BlockPos pos, String source) implemen
                     BlockPos.STREAM_CODEC, SaveControllerProgramPayload::pos,
                     ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
                     SaveControllerProgramPayload::source,
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_SOURCE_BYTES),
+                    SaveControllerProgramPayload::compiledSource,
+                    ByteBufCodecs.stringUtf8(ControllerProgram.MAX_WORKSPACE_PATH_BYTES),
+                    SaveControllerProgramPayload::workspacePath,
                     SaveControllerProgramPayload::new);
 
     @Override

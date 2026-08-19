@@ -155,11 +155,7 @@ public final class McpTools {
     }
 
     private JsonObject upload(JsonObject arguments) throws McpToolException {
-        var source = scriptSource(arguments, "source");
-        if (!ControllerProgram.isWithinLimit(source)) {
-            throw new McpToolException(-32602,
-                    "source too long (max " + ControllerProgram.MAX_SOURCE_LENGTH + " chars)");
-        }
+        var program = controllerProgramFile(arguments);
         var mc = Minecraft.getInstance();
         if (mc.getConnection() == null) {
             throw new McpToolException(-32000, "not connected to a server");
@@ -178,7 +174,8 @@ public final class McpTools {
             mc.execute(() -> {
                 try {
                     PacketDistributor.sendToServer(new UploadControllerProgramPayload(
-                            requestId, binding.dimension(), binding.pos(), source));
+                            requestId, binding.dimension(), binding.pos(),
+                            program.source(), program.compiledSource(), program.workspacePath()));
                 } catch (RuntimeException exception) {
                     registry.completeUpload(new UploadResultPayload(
                             requestId, false, "failed to send: " + exception.getMessage()));
@@ -219,10 +216,11 @@ public final class McpTools {
     }
 
     /**
-     * Script source for execute/upload: a {@code file} argument (filename
+     * Script source for probe execution: a {@code file} argument (filename
      * relative to the appliedscripts workspace) takes precedence over the inline
      * {@code inlineName} argument, so long scripts with baked recipes can live in
-     * files instead of the tool call. {@code include("file")} calls are resolved
+     * files instead of the tool call. Production upload has a separate file-only path.
+     * {@code include("file")} calls are resolved
      * as textual substitutions against the workspace before sending, and
      * {@code require_recipes(filter)} calls are expanded to recipe literals.
      */
@@ -248,6 +246,38 @@ public final class McpTools {
                     + " expansion; narrow the require_recipes filters (or trim include()s)");
         }
         return bundled;
+    }
+
+    /** Production uploads are always anchored to a real local workspace file. */
+    private static ControllerProgramFile controllerProgramFile(JsonObject arguments)
+            throws McpToolException {
+        if (!arguments.has("file")) {
+            throw new McpToolException(-32602,
+                    "file is required; controller programs cannot be uploaded without a local backup");
+        }
+        var requested = arguments.get("file").getAsString();
+        var path = ScriptBundler.resolveFile(requested, null);
+        if (path == null) {
+            throw new McpToolException(-32602,
+                    "script file not found: " + requested + " (resolved against the appliedscripts workspace)");
+        }
+        var workspace = ScriptBundler.workspaceDir().toAbsolutePath().normalize();
+        var absolute = path.toAbsolutePath().normalize();
+        if (!absolute.startsWith(workspace)) {
+            throw new McpToolException(-32602,
+                    "upload file must be inside the appliedscripts workspace");
+        }
+        var relative = workspace.relativize(absolute).toString().replace('\\', '/');
+        if (!ControllerProgram.isWorkspacePathWithinLimit(relative)) {
+            throw new McpToolException(-32602, "workspace file path is too long");
+        }
+        var source = readFile(path, requested);
+        var compiled = ScriptBundler.bundle(source, path.getParent());
+        if (!ControllerProgram.isWithinLimit(compiled)) {
+            throw new McpToolException(-32602, "bundled source exceeds "
+                    + ControllerProgram.MAX_SOURCE_LENGTH + " chars after preprocessing");
+        }
+        return new ControllerProgramFile(source, compiled, relative);
     }
 
     private static String readFile(Path path, String name) throws McpToolException {
@@ -287,11 +317,8 @@ public final class McpTools {
         file.addProperty("type", "string");
         file.addProperty("description", text("mcp.appliedfactory.prompt.upload.file"));
         properties.add("file", file);
-        var source = new JsonObject();
-        source.addProperty("type", "string");
-        source.addProperty("description", text("mcp.appliedfactory.prompt.upload.source"));
-        properties.add("source", source);
-        return tool("appliedfactory_upload", text("mcp.appliedfactory.prompt.upload.tool"), properties);
+        return tool("appliedfactory_upload", text("mcp.appliedfactory.prompt.upload.tool"),
+                properties, "file");
     }
 
     private JsonObject statusSchema() {
@@ -335,5 +362,9 @@ public final class McpTools {
     /** MCP is client-side, so tool descriptions follow the active Minecraft resource-pack language. */
     private static String text(String key, Object... args) {
         return I18n.get(key, args);
+    }
+
+    private record ControllerProgramFile(
+            String source, String compiledSource, String workspacePath) {
     }
 }

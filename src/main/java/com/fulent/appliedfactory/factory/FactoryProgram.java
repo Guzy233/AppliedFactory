@@ -66,13 +66,13 @@ public final class FactoryProgram {
         boolean dropItem(
                 UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item);
 
-        boolean use(UUID workflowId, FactoryBusAddress bus);
+        boolean use(UUID workflowId, FactoryBusAddress bus, boolean shift);
 
         boolean use(
-                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item);
+                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item, boolean shift);
 
         boolean place(
-                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef block);
+                UUID workflowId, FactoryBusAddress bus, FactoryResourceRef block, boolean shift);
 
         Optional<FactoryResourceRef> breakBlock(
                 UUID workflowId, FactoryBusAddress bus, FactoryResourceRef tool);

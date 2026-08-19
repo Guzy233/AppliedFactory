@@ -28,6 +28,7 @@ import com.fulent.appliedfactory.part.FactoryBusPart;
 import com.fulent.appliedfactory.script.CompiledControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgram;
 import com.fulent.appliedfactory.script.ControllerProgramStore;
+import com.fulent.appliedfactory.script.ControllerProgramSources;
 import com.fulent.appliedfactory.script.ProgramLoadResult;
 import com.fulent.appliedfactory.script.ScriptHandlerRef;
 
@@ -93,6 +94,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     private List<OfferedPattern> offeredPatterns = List.of();
     private String controllerProgram = ControllerProgram.DEFAULT_SOURCE;
+    private String compiledControllerProgram = ControllerProgram.DEFAULT_SOURCE;
+    private String controllerProgramPath = "";
     /** UUID reference into the world-level ControllerProgramStore; never carries source in chunk NBT. */
     private UUID controllerProgramId;
     private boolean patternsDirty = true;
@@ -131,7 +134,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             networkNodes.values().forEach(node -> node.create(level, worldPosition));
             if (!level.isClientSide && !programInitialized) {
                 programInitialized = true;
-                program = createProgram(controllerProgram);
+                program = createProgram(compiledControllerProgram);
                 invalidatePatterns();
             }
         }
@@ -161,7 +164,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                         ? tag.getCompound(ESCROW_NBT_KEY)
                         : new CompoundTag(),
                 registries);
-        controllerProgram = loadControllerProgram(tag);
+        var loadedProgram = loadControllerProgram(tag);
+        controllerProgram = loadedProgram.source();
+        compiledControllerProgram = loadedProgram.compiledSource();
+        controllerProgramPath = loadedProgram.workspacePath();
         logSubscribers.clear();
         reportedScriptFailures.clear();
         var savedSubscribers = tag.getList(ERROR_SUBSCRIBERS_NBT_KEY, Tag.TAG_COMPOUND);
@@ -172,7 +178,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             }
         }
         if (level == null || !level.isClientSide) {
-            program = createProgram(controllerProgram);
+            program = createProgram(compiledControllerProgram);
             programInitialized = true;
         } else {
             program = null;
@@ -221,10 +227,6 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     public void onStateChanged(
             FactoryControllerBlockEntity owner, IGridNode node, State state) {
         invalidatePatterns();
-        // Grid state changed: notify the script's network.onChange listeners on the next step.
-        if (program != null) {
-            program.markEnvironmentChanged();
-        }
     }
 
     @Override
@@ -252,6 +254,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         return controllerProgram;
     }
 
+    public String getControllerProgramPath() {
+        return controllerProgramPath;
+    }
+
     public boolean isLogSubscribed(UUID playerId) {
         return logSubscribers.contains(playerId);
     }
@@ -267,17 +273,24 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      * Successful replacement discards old in-memory generators; their escrow allocations are
      * recovered by the replacement on its next tick.
      */
-    public ProgramLoadResult<FactoryProgram> updateControllerProgram(String source) {
-        if (!ControllerProgram.isWithinLimit(source)) {
+    public ProgramLoadResult<FactoryProgram> updateControllerProgram(
+            String source, String compiledSource, String workspacePath) {
+        if (!ControllerProgram.isWithinLimit(source)
+                || !ControllerProgram.isWithinLimit(compiledSource)) {
             return ProgramLoadResult.failure(
                     "Factory program exceeds the " + ControllerProgram.MAX_SOURCE_LENGTH
                             + " character source limit");
         }
-        var result = FactoryProgram.replace(program, source, this);
+        if (!ControllerProgram.isWorkspacePathWithinLimit(workspacePath)) {
+            return ProgramLoadResult.failure("Factory program must have a local workspace file");
+        }
+        var result = FactoryProgram.replace(program, compiledSource, this);
         if (!result.successful()) {
             return result;
         }
         controllerProgram = source;
+        compiledControllerProgram = compiledSource;
+        controllerProgramPath = workspacePath;
         ensureControllerProgramStored();
         program = result.program();
         programInitialized = true;
@@ -300,14 +313,15 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      * Reads the compact program reference, migrating the old chunk-NBT string once on the
      * server. Clients deliberately keep no copy: the editor requests source only while open.
      */
-    private String loadControllerProgram(CompoundTag tag) {
+    private ControllerProgramSources loadControllerProgram(CompoundTag tag) {
         controllerProgramId = tag.hasUUID(ControllerProgram.PROGRAM_ID_NBT_KEY)
                 ? tag.getUUID(ControllerProgram.PROGRAM_ID_NBT_KEY) : null;
         var legacySource = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
                 ? tag.getString(ControllerProgram.NBT_KEY)
                 : ControllerProgram.DEFAULT_SOURCE;
         if (!(level instanceof ServerLevel serverLevel)) {
-            return ControllerProgram.DEFAULT_SOURCE;
+            return new ControllerProgramSources(
+                    ControllerProgram.DEFAULT_SOURCE, ControllerProgram.DEFAULT_SOURCE, "");
         }
         var store = ControllerProgramStore.get(serverLevel);
         if (controllerProgramId != null) {
@@ -322,8 +336,9 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         // legacy value when possible, then self-heal the world-level record.
         var source = ControllerProgram.isWithinLimit(legacySource)
                 ? legacySource : ControllerProgram.DEFAULT_SOURCE;
-        store.put(controllerProgramId, source);
-        return source;
+        var programSources = new ControllerProgramSources(source, source, "");
+        store.put(controllerProgramId, programSources);
+        return programSources;
     }
 
     private void ensureControllerProgramStored() {
@@ -333,7 +348,9 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         if (controllerProgramId == null) {
             controllerProgramId = UUID.randomUUID();
         }
-        ControllerProgramStore.get(serverLevel).put(controllerProgramId, controllerProgram);
+        ControllerProgramStore.get(serverLevel).put(controllerProgramId,
+                new ControllerProgramSources(
+                        controllerProgram, compiledControllerProgram, controllerProgramPath));
     }
 
     private void removeStoredControllerProgram() {
@@ -495,24 +512,26 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
-    public boolean use(UUID workflowId, FactoryBusAddress bus) {
-        return actionExecutor.use(bus);
+    public boolean use(UUID workflowId, FactoryBusAddress bus, boolean shift) {
+        return actionExecutor.use(bus, shift);
     }
 
     @Override
     public boolean use(
             UUID workflowId,
             FactoryBusAddress bus,
-            com.fulent.appliedfactory.factory.FactoryResourceRef item) {
-        return actionExecutor.use(workflowId, bus, item);
+            com.fulent.appliedfactory.factory.FactoryResourceRef item,
+            boolean shift) {
+        return actionExecutor.use(workflowId, bus, item, shift);
     }
 
     @Override
     public boolean place(
             UUID workflowId,
             FactoryBusAddress bus,
-            com.fulent.appliedfactory.factory.FactoryResourceRef block) {
-        return actionExecutor.place(workflowId, bus, block);
+            com.fulent.appliedfactory.factory.FactoryResourceRef block,
+            boolean shift) {
+        return actionExecutor.place(workflowId, bus, block, shift);
     }
 
     @Override

@@ -7,14 +7,8 @@ import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
-import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryBusTarget;
-import com.fulent.appliedfactory.menu.FactoryBusMenu;
-
-import appeng.api.ids.AEItemIds;
-import appeng.api.inventories.ISegmentedInventory;
-import appeng.api.inventories.InternalInventory;
 import appeng.api.networking.GridFlags;
 import appeng.api.networking.GridHelper;
 import appeng.api.networking.IGridNode;
@@ -26,34 +20,23 @@ import appeng.api.parts.IPartHost;
 import appeng.api.parts.IPartItem;
 import appeng.api.parts.IPartModel;
 import appeng.api.parts.PartModels;
-import appeng.api.upgrades.IUpgradeInventory;
-import appeng.api.upgrades.IUpgradeableObject;
-import appeng.api.upgrades.UpgradeInventories;
 import appeng.api.util.AECableType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
-import net.neoforged.neoforge.common.extensions.IPlayerExtension;
 
 /**
  * A channel-using AE cable part that exposes the adjacent block to factory
  * controller programs.
  */
 public final class FactoryBusPart
-        implements IPart, IGridNodeListener<FactoryBusPart>, IUpgradeableObject, ISegmentedInventory {
-    public static final int UPGRADE_SLOTS = 4;
+        implements IPart, IGridNodeListener<FactoryBusPart> {
 
     private static final ResourceLocation MODEL_BASE = aeModel("part/import_bus_base");
     private static final ResourceLocation MODEL_OFF = aeModel("part/import_bus_off");
@@ -65,7 +48,6 @@ public final class FactoryBusPart
 
     private final IPartItem<FactoryBusPart> partItem;
     private final IManagedGridNode mainNode;
-    private final IUpgradeInventory upgrades;
 
     @Nullable
     private IPartHost host;
@@ -84,7 +66,6 @@ public final class FactoryBusPart
                 .setIdlePowerUsage(0.5D)
                 .setVisualRepresentation(partItem)
                 .setExposedOnSides(Set.of());
-        this.upgrades = UpgradeInventories.forMachine(partItem, UPGRADE_SLOTS, this::onUpgradesChanged);
     }
 
     /** Register the borrowed AE2 import-bus models before model loading freezes. */
@@ -129,14 +110,12 @@ public final class FactoryBusPart
     @Override
     public void readFromNBT(CompoundTag data, HolderLookup.Provider registries) {
         mainNode.loadFromNBT(data);
-        upgrades.readFromNBT(data, "upgrades", registries);
         redstoneOutput = clampRedstone(data.getInt("redstoneOutput"));
     }
 
     @Override
     public void writeToNBT(CompoundTag data, HolderLookup.Provider registries) {
         mainNode.saveToNBT(data);
-        upgrades.writeToNBT(data, "upgrades", registries);
         data.putInt("redstoneOutput", redstoneOutput);
     }
 
@@ -189,27 +168,6 @@ public final class FactoryBusPart
         }
     }
 
-    /**
-     * AE2 forwards cable neighbor changes to its parts. When the block this bus targets changed,
-     * tell the controllers on our grid so their network.onChange callbacks run — this replaces
-     * the bus-set and machine-info part of the old per-tick topology fingerprint.
-     */
-    @Override
-    public void onNeighborChanged(BlockGetter level, BlockPos pos, BlockPos neighbor) {
-        if (hostBlockEntity == null || side == null
-                || !neighbor.equals(hostBlockEntity.getBlockPos().relative(side))) {
-            return;
-        }
-        var node = mainNode.getNode();
-        var grid = node == null ? null : node.getGrid();
-        if (grid == null) {
-            return;
-        }
-        for (var controller : grid.getMachines(FactoryControllerBlockEntity.class)) {
-            controller.onBusTopologyChanged();
-        }
-    }
-
     @Override
     public float getCableConnectionLength(AECableType cable) {
         return 5;
@@ -246,43 +204,6 @@ public final class FactoryBusPart
     private boolean isClientSide() {
         return hostBlockEntity == null || hostBlockEntity.getLevel() == null
                 || hostBlockEntity.getLevel().isClientSide;
-    }
-
-    @Override
-    public IUpgradeInventory getUpgrades() {
-        return upgrades;
-    }
-
-    @Nullable
-    @Override
-    public InternalInventory getSubInventory(ResourceLocation id) {
-        return UPGRADES.equals(id) ? upgrades : null;
-    }
-
-    @Override
-    public void addAdditionalDrops(List<ItemStack> drops, boolean wrenched) {
-        IPart.super.addAdditionalDrops(drops, wrenched);
-        for (var stack : upgrades) {
-            if (!stack.isEmpty()) {
-                drops.add(stack.copy());
-            }
-        }
-    }
-
-    @Override
-    public void clearContent() {
-        IPart.super.clearContent();
-        upgrades.clear();
-    }
-
-    private void onUpgradesChanged() {
-        if (host != null) {
-            host.markForSave();
-        }
-    }
-
-    public int accelerationCards() {
-        return upgrades.getInstalledUpgrades(BuiltInRegistries.ITEM.get(AEItemIds.SPEED_CARD));
     }
 
     /** Sets the redstone strength emitted from this bus's physical cable face. */
@@ -352,16 +273,7 @@ public final class FactoryBusPart
     @Nullable
     @Override
     public boolean onUseWithoutItem(Player player, Vec3 pos) {
-        if (!player.level().isClientSide && player instanceof ServerPlayer serverPlayer && side != null) {
-            var title = Component.translatable("item.appliedfactory.factory_bus");
-            ((IPlayerExtension) serverPlayer).openMenu(new SimpleMenuProvider(
-                    (containerId, inventory, ignored) -> new FactoryBusMenu(containerId, inventory, this),
-                    title), data -> {
-                        data.writeBlockPos(getHostPosition());
-                        data.writeEnum(side);
-                    });
-        }
-        return true;
+        return false;
     }
 
     private static ResourceLocation aeModel(String path) {

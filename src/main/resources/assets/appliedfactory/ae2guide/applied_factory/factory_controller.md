@@ -15,10 +15,10 @@ item_ids:
 
 The Factory Controller is a programmable AE2 processing provider. Each face connects to an independent AE2 network. Attach a Factory Bus to a face, point it at an external machine, then use the controller program to move resources and register processing patterns.
 
-Open the controller to edit its Rhino JavaScript program. The `appliedscripts/` workspace contains the generated API reference, type declarations, examples, and MCP instructions.
+Open the controller and choose a Rhino JavaScript file from the `appliedscripts/` browser. “Precompile & Upload” saves the local file first, then uploads both its editable source and preprocessed executable source. Remote source without a matching local backup must be pulled before it can be edited or uploaded.
 
 ## MCP
 
 The controller can be linked to the local MCP server. Use `appliedfactory_execute` for probe programs and `appliedfactory_upload` only after validating the production program.
 
-`include("file")` is a textual replacement, like C++ `#include`; file extensions do not change this behavior. GUI source is treated as a virtual file in the `appliedscripts/` root, so it can use relative `include()` paths and `require_recipes()` too. Controller sources may contain up to 128k characters and are stored in world-level data, not in the controller chunk NBT.
+`include("file")` is a textual replacement, like C++ `#include`; file extensions do not change this behavior. Relative includes and recipe macros resolve from the selected script's directory. Editable source, executable source, and the workspace-relative path are stored in world-level data rather than controller chunk NBT.

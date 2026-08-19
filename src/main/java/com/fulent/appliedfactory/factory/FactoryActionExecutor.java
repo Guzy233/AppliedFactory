@@ -201,14 +201,14 @@ public final class FactoryActionExecutor {
     }
 
     /** Immediately attempts an empty-hand use on the bus target. */
-    public boolean use(FactoryBusAddress bus) {
+    public boolean use(FactoryBusAddress bus, boolean shift) {
         var target = busResolver.resolve(bus).orElse(null);
-        return target != null && target.use();
+        return target != null && target.use(shift);
     }
 
     /** Immediately attempts one item use and writes its remainder to the source. */
     public boolean use(
-            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input) {
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input, boolean shift) {
         validateWorkflowOrigin(workflowId, input);
         requireSingleItem(input, false);
         var target = busResolver.resolve(bus).orElse(null);
@@ -222,7 +222,7 @@ public final class FactoryActionExecutor {
         var held = singleItem(extracted);
         FactoryBusTarget.ItemUseResult result;
         try {
-            result = target.useItem(held);
+            result = target.useItem(held, shift);
         } catch (RuntimeException exception) {
             restoreSource(workflowId, input.origin(),
                     recoverySide(input.origin(), bus), extracted);
@@ -242,7 +242,7 @@ public final class FactoryActionExecutor {
 
     /** Immediately attempts one block-item placement. */
     public boolean place(
-            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input) {
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef input, boolean shift) {
         validateWorkflowOrigin(workflowId, input);
         requireSingleItem(input, true);
         var target = busResolver.resolve(bus).orElse(null);
@@ -255,7 +255,7 @@ public final class FactoryActionExecutor {
         }
         FactoryBusTarget.ItemUseResult result;
         try {
-            result = target.placeAndCollect(singleItem(extracted));
+            result = target.placeAndCollect(singleItem(extracted), shift);
         } catch (RuntimeException exception) {
             restoreSource(workflowId, input.origin(),
                     recoverySide(input.origin(), bus), extracted);

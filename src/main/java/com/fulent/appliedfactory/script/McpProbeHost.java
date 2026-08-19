@@ -119,19 +119,20 @@ public final class McpProbeHost implements FactoryProgram.Host {
     }
 
     @Override
-    public boolean use(UUID workflowId, FactoryBusAddress bus) {
-        return controller.use(workflowId, bus);
+    public boolean use(UUID workflowId, FactoryBusAddress bus, boolean shift) {
+        return controller.use(workflowId, bus, shift);
     }
 
     @Override
-    public boolean use(UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item) {
-        return controller.use(workflowId, bus, item);
+    public boolean use(
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef item, boolean shift) {
+        return controller.use(workflowId, bus, item, shift);
     }
 
     @Override
     public boolean place(
-            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef block) {
-        return controller.place(workflowId, bus, block);
+            UUID workflowId, FactoryBusAddress bus, FactoryResourceRef block, boolean shift) {
+        return controller.place(workflowId, bus, block, shift);
     }
 
     @Override
