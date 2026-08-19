@@ -78,6 +78,7 @@ neoForge {
 
 configurations {
     runtimeClasspath.extendsFrom localRuntime
+    typescriptCompiler
 }
 
 dependencies {
@@ -85,12 +86,24 @@ dependencies {
     compileOnly "org.appliedenergistics:appliedenergistics2:${ae2_version}"
     localRuntime "org.appliedenergistics:appliedenergistics2:${ae2_version}"
 
-   jarJar(implementation("org.mozilla:rhino:${rhino_version}")) {
+   jarJar(implementation("org.graalvm.polyglot:polyglot:${graaljs_version}")) {
         version {
-            strictly "[${rhino_version}]"
+            strictly "[${graaljs_version}]"
         }
     }
-    additionalRuntimeClasspath "org.mozilla:rhino:${rhino_version}"
+    jarJar(implementation("org.graalvm.js:js-language:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.truffle:truffle-runtime:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.truffle:truffle-api:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.truffle:truffle-compiler:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.regex:regex:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.sdk:collections:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.sdk:jniutils:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.sdk:nativeimage:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.sdk:word:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.shadowed:icu4j:${graaljs_version}"))
+    jarJar(implementation("org.graalvm.shadowed:xz:${graaljs_version}"))
+    additionalRuntimeClasspath "org.graalvm.polyglot:js-community:${graaljs_version}"
+    typescriptCompiler "org.webjars.npm:typescript:${typescript_version}"
 
     compileOnly "mezz.jei:jei-${minecraft_version}-common-api:${jei_version}"
     compileOnly "mezz.jei:jei-${minecraft_version}-neoforge-api:${jei_version}"
@@ -116,7 +129,7 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
             mod_license            : mod_license,
             mod_description        : mod_description,
             ae2_version            : ae2_version,
-            rhino_version          : rhino_version,
+            graaljs_version        : graaljs_version,
             mod_version            : mod_version,
     ]
     inputs.properties replaceProperties
@@ -142,6 +155,22 @@ var generateDocs = tasks.register("generateDocs", Sync) {
 }
 sourceSets.main.resources.srcDir generateDocs
 neoForge.ideSyncTask generateDocs
+
+// ModLauncher exposes GraalJS classes from dependency jars, but not arbitrary
+// WebJar resources through the transformed mod class loader. Copy the pinned
+// compiler bundle into this mod's own resource namespace for both dev and production.
+var generateTypescriptCompiler = tasks.register("generateTypescriptCompiler", Sync) {
+    from({ configurations.typescriptCompiler.collect { zipTree(it) } }) {
+        include "META-INF/resources/webjars/typescript/${typescript_version}/lib/typescript.js"
+        eachFile { details ->
+            details.path = "assets/appliedfactory/compiler/typescript.js"
+        }
+        includeEmptyDirs = false
+    }
+    into "build/generated/typescriptResources"
+}
+sourceSets.main.resources.srcDir generateTypescriptCompiler
+neoForge.ideSyncTask generateTypescriptCompiler
 
 publishing {
     publications {

@@ -175,6 +175,7 @@ public final class FactoryControllerProgramScreen
         var source = scriptBox.getValue();
         final String compiled;
         try {
+            ScriptBundler.requireTypeScriptEntry(selectedPath);
             ScriptWorkspaceFiles.write(selectedPath, source);
             compiled = ScriptBundler.bundle(source, ScriptWorkspaceFiles.absolute(selectedPath).getParent());
         } catch (IOException | IllegalArgumentException | McpToolException exception) {

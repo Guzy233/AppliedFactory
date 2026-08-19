@@ -157,6 +157,11 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     private void destroyGridNodes() {
         networkNodes.values().forEach(IManagedGridNode::destroy);
+        if (program != null) {
+            program.discard();
+            program = null;
+        }
+        programInitialized = false;
     }
 
     @Override

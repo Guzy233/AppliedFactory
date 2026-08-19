@@ -114,7 +114,9 @@ public final class McpProbeManager {
             long elapsed = now - probe.startedAt();
             if (probe.program().activeJobCount() == 0) {
                 ACTIVE.remove(entry.getKey());
-                entry.getValue().sink().onResult(entry.getKey(), completed(probe, elapsed));
+                var result = completed(probe, elapsed);
+                probe.program().discard();
+                entry.getValue().sink().onResult(entry.getKey(), result);
             } else if (elapsed >= HARD_TIMEOUT_TICKS
                     || (probe.timeoutTicks() > 0 && elapsed >= probe.timeoutTicks())) {
                 ACTIVE.remove(entry.getKey());

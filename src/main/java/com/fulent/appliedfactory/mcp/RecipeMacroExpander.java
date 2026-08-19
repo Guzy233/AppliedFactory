@@ -4,24 +4,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
-import org.mozilla.javascript.Parser;
-import org.mozilla.javascript.ast.ArrayLiteral;
-import org.mozilla.javascript.ast.AstNode;
-import org.mozilla.javascript.ast.AstRoot;
-import org.mozilla.javascript.ast.FunctionCall;
-import org.mozilla.javascript.ast.Name;
-import org.mozilla.javascript.ast.ObjectLiteral;
-import org.mozilla.javascript.ast.ObjectProperty;
-import org.mozilla.javascript.ast.StringLiteral;
-
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -58,123 +44,25 @@ import com.google.gson.JsonParseException;
  */
 public final class RecipeMacroExpander {
     private static final String MACRO = "require_recipes";
-    private static final Set<String> FILTER_KEYS =
-            Set.of("id", "type", "machine", "input", "output");
     private static final Gson GSON = new Gson();
 
     private RecipeMacroExpander() {
     }
 
-    /**
-     * Expands every {@code require_recipes(...)} call in {@code source};
-     * returns the source unchanged when there are none. {@code baseDir} is the
-     * directory of the file that originally contained the script. Inline MCP
-     * and editor sources use the appliedscripts workspace root as their virtual
-     * directory; data files are resolved like {@code include()} targets.
-     */
-    public static String expand(String source, @Nullable Path baseDir) throws McpToolException {
-        AstRoot ast;
-        try {
-            ast = new Parser().parse(source, "<factory script>", 1);
-        } catch (RuntimeException exception) {
-            throw new McpToolException(-32602, "script parse failed: " + exception.getMessage());
-        }
-        var calls = new ArrayList<Call>();
-        ast.visitAll(node -> {
-            if (node instanceof FunctionCall call
-                    && call.getTarget() instanceof Name name
-                    && MACRO.equals(name.getIdentifier())) {
-                calls.add(new Call(call.getAbsolutePosition(), call.getLength(), filter(call)));
-            }
-            return true;
-        });
-        if (calls.isEmpty()) {
-            return source;
-        }
+    /** Selects and serializes one statically parsed macro invocation. */
+    static String expandFilter(Map<String, List<String>> filter, @Nullable Path baseDir)
+            throws McpToolException {
         var recipes = loadArray("processing_recipes.json", baseDir);
-        var needsMachineTypes = calls.stream()
-                .anyMatch(call -> call.filter().containsKey("machine"));
-        var machineTypes = needsMachineTypes ? loadObject("recipe_types.json", baseDir) : null;
-        calls.sort(Comparator.comparingInt(Call::offset));
-        var result = new StringBuilder();
-        int cursor = 0;
+        var machineTypes = filter.containsKey("machine")
+                ? loadObject("recipe_types.json", baseDir)
+                : null;
         try {
-            for (var call : calls) {
-                if (call.offset() < cursor) {
-                    throw new McpToolException(-32602, "overlapping " + MACRO + "() calls");
-                }
-                result.append(source, cursor, call.offset());
-                result.append(select(recipes, machineTypes, call.filter()).toString());
-                cursor = call.offset() + call.length();
-            }
-        } catch (McpToolException exception) {
-            throw exception;
+            return select(recipes, machineTypes, filter).toString();
         } catch (RuntimeException exception) {
             throw new McpToolException(-32602, MACRO + "() expansion failed: "
                     + exception.getMessage() + " (is " + "processing_recipes.json"
                     + " well-formed?)");
         }
-        result.append(source, cursor, source.length());
-        return result.toString();
-    }
-
-    private static Map<String, List<String>> filter(FunctionCall call) throws McpToolException {
-        var arguments = call.getArguments();
-        if (arguments.size() > 1) {
-            throw new McpToolException(-32602, MACRO
-                    + "() takes one filter object, e.g. " + MACRO + "({ type: \"minecraft:smelting\" })");
-        }
-        if (arguments.isEmpty()) {
-            return Map.of();
-        }
-        if (!(arguments.get(0) instanceof ObjectLiteral literal)) {
-            throw new McpToolException(-32602, MACRO
-                    + "() filter must be an object literal, e.g. " + MACRO + "({ output: \"minecraft:iron_ingot\" })");
-        }
-        var filter = new LinkedHashMap<String, List<String>>();
-        for (var element : literal.getElements()) {
-            if (!(element instanceof ObjectProperty property)) {
-                throw new McpToolException(-32602, MACRO
-                        + "() filter must be a plain object literal of name: value pairs");
-            }
-            var key = keyOf(property);
-            if (!FILTER_KEYS.contains(key)) {
-                throw new McpToolException(-32602, MACRO + "(): unknown filter key \""
-                        + key + "\" (valid: " + String.join(", ", FILTER_KEYS) + ")");
-            }
-            filter.put(key, valuesOf(property.getValue(), key));
-        }
-        return Map.copyOf(filter);
-    }
-
-    private static String keyOf(ObjectProperty property) throws McpToolException {
-        var keyNode = property.getKey();
-        if (keyNode instanceof Name name) {
-            return name.getIdentifier();
-        }
-        if (keyNode instanceof StringLiteral literal) {
-            return literal.getValue();
-        }
-        throw new McpToolException(-32602, MACRO + "() filter keys must be plain names");
-    }
-
-    private static List<String> valuesOf(AstNode node, String key) throws McpToolException {
-        if (node instanceof StringLiteral literal) {
-            return List.of(literal.getValue());
-        }
-        if (node instanceof ArrayLiteral array) {
-            var result = new ArrayList<String>();
-            for (var element : array.getElements()) {
-                if (!(element instanceof StringLiteral literal)) {
-                    throw new McpToolException(-32602, MACRO + "() filter \""
-                            + key + "\" must contain only strings");
-                }
-                result.add(literal.getValue());
-            }
-            return List.copyOf(result);
-        }
-        throw new McpToolException(-32602, MACRO + "() filter \""
-                + key + "\" must be a string or an array of strings");
     }
 
     private static JsonArray select(
@@ -299,6 +187,9 @@ public final class RecipeMacroExpander {
 
     private static String load(String name, @Nullable Path baseDir) throws McpToolException {
         var path = ScriptBundler.resolveFile(name, baseDir);
+        if (path == null && baseDir != null) {
+            path = ScriptBundler.resolveFile(name, ScriptBundler.workspaceDir());
+        }
         if (path == null) {
             throw new McpToolException(-32602, MACRO + "(): " + name
                     + " not found in the appliedscripts workspace; run /appliedfactory export"
@@ -310,8 +201,5 @@ public final class RecipeMacroExpander {
             throw new McpToolException(-32602, MACRO + "(): failed to read " + path
                     + ": " + exception.getMessage());
         }
-    }
-
-    private record Call(int offset, int length, Map<String, List<String>> filter) {
     }
 }

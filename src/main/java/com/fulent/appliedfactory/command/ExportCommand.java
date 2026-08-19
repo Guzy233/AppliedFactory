@@ -417,7 +417,7 @@ public final class ExportCommand {
         // 3. Hardcoded fallback in case neither source is discoverable.
         if (names.isEmpty()) {
             names.addAll(List.of(
-                    "SCRIPT_API.md", "applied_factory.d.ts", "agents.md", "demo.js", "tsconfig.json"));
+                    "SCRIPT_API.md", "applied_factory.d.ts", "agents.md", "demo.ts", "tsconfig.json"));
         }
         names.removeAll(DYNAMIC_FILES);
         return names;

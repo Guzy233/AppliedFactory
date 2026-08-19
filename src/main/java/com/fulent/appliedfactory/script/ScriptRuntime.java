@@ -27,6 +27,10 @@ public interface ScriptRuntime {
 
     void runTopologyListeners();
 
+    /** Releases the engine context and every live guest value owned by it. */
+    default void close() {
+    }
+
     /** JSON-serialized value of the last top-level expression, or null when unavailable. */
     @Nullable
     default String lastValueJson() {

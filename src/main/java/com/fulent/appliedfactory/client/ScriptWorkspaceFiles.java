@@ -51,7 +51,7 @@ final class ScriptWorkspaceFiles {
         }
         var dot = safeSuggestion.lastIndexOf('.');
         var stem = dot > 0 ? safeSuggestion.substring(0, dot) : safeSuggestion;
-        var suffix = dot > 0 ? safeSuggestion.substring(dot) : ".js";
+        var suffix = dot > 0 ? safeSuggestion.substring(dot) : ".ts";
         for (int index = 1; ; index++) {
             var candidate = stem + ".downloaded" + (index == 1 ? "" : index) + suffix;
             if (!exists(candidate)) {
@@ -86,9 +86,14 @@ final class ScriptWorkspaceFiles {
     private static String safeSuggestion(String suggestedPath) {
         try {
             resolve(suggestedPath);
-            return suggestedPath;
+            var normalized = suggestedPath.toLowerCase(java.util.Locale.ROOT);
+            if (normalized.endsWith(".ts") && !normalized.endsWith(".d.ts")) {
+                return suggestedPath;
+            }
+            var dot = suggestedPath.lastIndexOf('.');
+            return (dot > 0 ? suggestedPath.substring(0, dot) : suggestedPath) + ".ts";
         } catch (IllegalArgumentException ignored) {
-            return "downloaded_controller.js";
+            return "downloaded_controller.ts";
         }
     }
 

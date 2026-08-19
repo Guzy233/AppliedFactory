@@ -23,7 +23,7 @@ public final class DocsExtractor {
             "agents.md",
             "SCRIPT_API.md",
             "applied_factory.d.ts",
-            "demo.js",
+            "demo.ts",
             "tsconfig.json");
 
     private DocsExtractor() {

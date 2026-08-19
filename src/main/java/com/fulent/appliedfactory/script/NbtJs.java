@@ -1,11 +1,9 @@
 package com.fulent.appliedfactory.script;
 
-import org.mozilla.javascript.Context;
-import org.mozilla.javascript.Function;
-import org.mozilla.javascript.NativeArray;
-import org.mozilla.javascript.Scriptable;
-import org.mozilla.javascript.ScriptableObject;
-import org.mozilla.javascript.Undefined;
+import java.util.LinkedHashMap;
+import java.util.ArrayList;
+
+import org.graalvm.polyglot.Value;
 
 import net.minecraft.nbt.ByteTag;
 import net.minecraft.nbt.CollectionTag;
@@ -27,12 +25,15 @@ final class NbtJs {
     private NbtJs() {
     }
 
-    static Object toJs(Context context, Scriptable scope, Tag tag) {
-        return convert(new Conversion(context, scope), tag, 0);
+    static Object toJs(Tag tag) {
+        return convert(new Conversion(), tag, 0);
     }
 
-    static CompoundTag fromObject(Context context, Scriptable object, String name) {
-        return compoundFrom(new Conversion(context, null), object, name, 0);
+    static CompoundTag fromObject(Value object, String name) {
+        if (!object.hasMembers() || object.hasArrayElements() || object.canExecute()) {
+            throw JsValues.error(name + " must be an NBT object");
+        }
+        return compoundFrom(new Conversion(), object, name, 0);
     }
 
     private static Object convert(Conversion conversion, Tag tag, int depth) {
@@ -41,111 +42,94 @@ final class NbtJs {
             return null;
         }
         if (tag instanceof CompoundTag compound) {
-            var result = conversion.context.newObject(conversion.scope);
+            var result = new LinkedHashMap<String, Object>();
             for (var key : compound.getAllKeys()) {
                 var value = convert(conversion, compound.get(key), depth + 1);
                 if (value != null) {
-                    ScriptableObject.defineProperty(
-                            result, key, value,
-                            ScriptableObject.READONLY | ScriptableObject.PERMANENT);
+                    result.put(key, value);
                 }
             }
             return result;
         }
         if (tag instanceof CollectionTag<?> collection) {
-            var values = new Object[collection.size()];
+            var values = new ArrayList<Object>(collection.size());
             for (int index = 0; index < collection.size(); index++) {
-                values[index] = convert(conversion, collection.get(index), depth + 1);
+                values.add(convert(conversion, collection.get(index), depth + 1));
             }
-            return conversion.context.newArray(conversion.scope, values);
+            return values;
         }
         if (tag instanceof StringTag string) {
             return string.getAsString();
         }
         if (tag instanceof LongTag longTag) {
             var value = longTag.getAsLong();
-            return value >= -SAFE_LONG && value <= SAFE_LONG
-                    ? (double) value
-                    : String.valueOf(value);
+            return value >= -SAFE_LONG && value <= SAFE_LONG ? (double) value : String.valueOf(value);
         }
         if (tag instanceof NumericTag numeric) {
             return numeric.getAsDouble();
         }
-        throw Context.reportRuntimeError("Unsupported NBT tag type in script read");
+        throw JsValues.error("Unsupported NBT tag type in script read");
     }
 
     private static CompoundTag compoundFrom(
-            Conversion conversion, Scriptable object, String name, int depth) {
+            Conversion conversion, Value object, String name, int depth) {
         conversion.visit(depth, "construction");
         var result = new CompoundTag();
-        for (Object id : object.getIds()) {
-            var key = Context.toString(id);
-            var value = ScriptableObject.getProperty(object, key);
-            if (value == Scriptable.NOT_FOUND || value == Undefined.instance || value == null) {
-                continue;
+        for (var key : object.getMemberKeys()) {
+            var value = object.getMember(key);
+            if (value != null && !value.isNull()) {
+                result.put(key, toTag(conversion, value, name + "." + key, depth + 1));
             }
-            result.put(key, toTag(conversion, value, name + "." + key, depth + 1));
         }
         return result;
     }
 
-    private static Tag toTag(Conversion conversion, Object value, String path, int depth) {
+    private static Tag toTag(Conversion conversion, Value value, String path, int depth) {
         conversion.visit(depth, "construction");
-        if (value instanceof NativeArray array) {
+        if (value.hasArrayElements()) {
             var list = new net.minecraft.nbt.ListTag();
-            for (long index = 0; index < array.getLength(); index++) {
-                var element = array.get((int) index, array);
-                if (element != Undefined.instance && element != null) {
-                    if (!list.addTag(list.size(),
-                            toTag(conversion, element, path + "[" + index + "]", depth + 1))) {
-                        throw Context.reportRuntimeError(
-                                "NBT list elements must have one type at " + path);
-                    }
+            for (long index = 0; index < value.getArraySize(); index++) {
+                var element = value.getArrayElement(index);
+                if (!element.isNull() && !list.addTag(list.size(),
+                        toTag(conversion, element, path + "[" + index + "]", depth + 1))) {
+                    throw JsValues.error("NBT list elements must have one type at " + path);
                 }
             }
             return list;
         }
-        if (value instanceof Scriptable scriptable) {
-            if (scriptable instanceof Function) {
-                throw Context.reportRuntimeError("Functions are not valid NBT at " + path);
+        if (value.canExecute()) {
+            throw JsValues.error("Functions are not valid NBT at " + path);
+        }
+        if (value.hasMembers()) {
+            return compoundFrom(conversion, value, path, depth + 1);
+        }
+        if (value.isString()) {
+            return StringTag.valueOf(value.asString());
+        }
+        if (value.isBoolean()) {
+            return ByteTag.valueOf(value.asBoolean());
+        }
+        if (value.isNumber()) {
+            var number = value.asDouble();
+            if (!Double.isFinite(number)) {
+                throw JsValues.error("NBT numbers must be finite at " + path);
             }
-            return compoundFrom(conversion, scriptable, path, depth + 1);
-        }
-        if (value instanceof String string) {
-            return StringTag.valueOf(string);
-        }
-        if (value instanceof Boolean bool) {
-            return ByteTag.valueOf(bool);
-        }
-        if (value instanceof Number number) {
-            var doubleValue = number.doubleValue();
-            if (!Double.isFinite(doubleValue)) {
-                throw Context.reportRuntimeError("NBT numbers must be finite at " + path);
+            if (number == Math.rint(number)) {
+                var integer = (long) number;
+                return integer >= Integer.MIN_VALUE && integer <= Integer.MAX_VALUE
+                        ? IntTag.valueOf((int) integer) : LongTag.valueOf(integer);
             }
-            if (doubleValue == Math.rint(doubleValue)) {
-                var longValue = number.longValue();
-                return longValue >= Integer.MIN_VALUE && longValue <= Integer.MAX_VALUE
-                        ? IntTag.valueOf((int) longValue)
-                        : LongTag.valueOf(longValue);
-            }
-            return DoubleTag.valueOf(doubleValue);
+            return DoubleTag.valueOf(number);
         }
-        throw Context.reportRuntimeError("Unsupported JavaScript value in NBT at " + path);
+        throw JsValues.error("Unsupported JavaScript value in NBT at " + path);
     }
 
     private static final class Conversion {
-        private final Context context;
-        private final Scriptable scope;
         private int nodes;
-
-        private Conversion(Context context, Scriptable scope) {
-            this.context = context;
-            this.scope = scope;
-        }
 
         private void visit(int depth, String operation) {
             if (depth > MAX_DEPTH || ++nodes > MAX_NODES) {
-                throw Context.reportRuntimeError("NBT exceeds the script " + operation + " limit");
+                throw JsValues.error("NBT exceeds the script " + operation + " limit");
             }
         }
     }

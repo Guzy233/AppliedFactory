@@ -6,12 +6,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.mozilla.javascript.Context;
-import org.mozilla.javascript.Function;
-import org.mozilla.javascript.NativeArray;
-import org.mozilla.javascript.Scriptable;
-import org.mozilla.javascript.ScriptableObject;
-import org.mozilla.javascript.Undefined;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Value;
 
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryEndpoint;
@@ -33,29 +29,26 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** State shared by the small Java facade graph installed into one Rhino scope. */
+/** State shared by the Java facade graph installed into one GraalJS context. */
 final class ScriptApi {
     private final FactoryProgram.Host host;
     private final Registration registration;
-    private final Scriptable scope;
     private final JsBridgeBinder binder;
-    private final EnumMap<Direction, List<Function>> topologyListeners =
-            new EnumMap<>(Direction.class);
+    private final EnumMap<Direction, List<Value>> topologyListeners = new EnumMap<>(Direction.class);
     private ScriptExecutionContext activeContext;
 
     ScriptApi(
             FactoryProgram.Host host,
             Registration registration,
-            Scriptable scope) {
+            Context context) {
         this.host = host;
         this.registration = registration;
-        this.scope = scope;
-        binder = new JsBridgeBinder(scope);
+        binder = new JsBridgeBinder(context);
     }
 
     void install() {
         binder.installGlobals(new JsGlobals(this));
-        ScriptableObject.putProperty(scope, "console", binder.wrap(new JsConsole(host)));
+        binder.installGlobal("console", new JsConsole(host));
     }
 
     void bind(ScriptExecutionContext context) {
@@ -80,10 +73,6 @@ final class ScriptApi {
         return binder.delegate(value);
     }
 
-    Scriptable scope() {
-        return scope;
-    }
-
     FactoryProgram.Host host() {
         return host;
     }
@@ -92,7 +81,7 @@ final class ScriptApi {
         return registration;
     }
 
-    void addTopologyListener(Direction side, Function listener) {
+    void addTopologyListener(Direction side, Value listener) {
         topologyListeners.computeIfAbsent(side, ignored -> new ArrayList<>()).add(listener);
     }
 
@@ -101,13 +90,13 @@ final class ScriptApi {
                 .flatMap(List::stream)
                 .toList();
         for (var listener : listeners) {
-            listener.call(Context.getCurrentContext(), scope, scope, new Object[0]);
+            listener.execute();
         }
     }
 
     Object performNow(FactoryTransferAction action, boolean arrayResult) {
         if (activeContext == null) {
-            throw Context.reportRuntimeError("Action.now() may only run inside a workflow");
+            throw JsValues.error("Action.now() may only run inside a workflow");
         }
         var result = host.performTransfer(activeContext.workflowId(), action);
         if (action.mode() == FactoryTransferAction.Mode.EXACT) {
@@ -122,9 +111,12 @@ final class ScriptApi {
     }
 
     /**
-     * Unified extract query: {@code extract(channel?, key?, amount?)}. Always returns a
-     * {@link #resourceArray(FactoryResourceOrigin, List)} (possibly empty, never null).
-     * Omitting {@code amount} (or passing -1) means "as much as available"; a positive
+     * Unified extract query: {@code extract(channel?, key?, amount?)}. Always
+     * returns a
+     * {@link #resourceArray(FactoryResourceOrigin, List)} (possibly empty, never
+     * null).
+     * Omitting {@code amount} (or passing -1) means "as much as available"; a
+     * positive
      * amount caps the result at that quantity.
      */
     Object extractResources(
@@ -133,25 +125,23 @@ final class ScriptApi {
             Object rawKey,
             Object rawAmount) {
         var origin = FactoryResourceOrigin.endpoint(endpoint);
-        if (rawChannel == Undefined.instance || rawChannel == null) {
+        if (JsValues.isNullish(rawChannel)) {
             return resourceArray(origin, host.availableResources(endpoint));
         }
-        var channel = resolveChannel(Context.toString(rawChannel));
+        var channel = resolveChannel(JsValues.string(rawChannel));
         var snapshot = host.availableResources(endpoint);
-        if (rawKey == Undefined.instance || rawKey == null) {
+        if (JsValues.isNullish(rawKey)) {
             return resourceArray(origin, snapshot.stream()
                     .filter(resource -> ScriptApi.channel(resource.key())
                             .equals(channel.getId().toString()))
                     .toList());
         }
-        if (!(rawKey instanceof Scriptable keyObject)) {
-            throw Context.reportRuntimeError("extract key must be an NBT object");
-        }
+        var keyObject = JsValues.object(rawKey, "extract key");
         var key = channel.loadKeyFromTag(
                 host.registries(),
-                NbtJs.fromObject(Context.getCurrentContext(), keyObject, "key"));
+                NbtJs.fromObject(keyObject, "key"));
         if (key == null) {
-            throw Context.reportRuntimeError(
+            throw JsValues.error(
                     "Invalid key for AE resource channel " + channel.getId());
         }
         var available = snapshot.stream()
@@ -163,17 +153,17 @@ final class ScriptApi {
             return resourceArray(origin, List.of());
         }
         long amount = available;
-        if (rawAmount != Undefined.instance && rawAmount != null) {
-            var number = Context.toNumber(rawAmount);
+        if (!JsValues.isNullish(rawAmount)) {
+            var number = JsValues.number(rawAmount, "Resource amount");
             if (!Double.isFinite(number) || number != Math.rint(number)
                     || Math.abs(number) > 9_007_199_254_740_991D) {
-                throw Context.reportRuntimeError("Resource amount must be positive or -1");
+                throw JsValues.error("Resource amount must be positive or -1");
             }
             var requested = (long) number;
             if (requested == -1) {
                 // same as omitted: as much as possible
             } else if (requested <= 0) {
-                throw Context.reportRuntimeError("Resource amount must be positive or -1");
+                throw JsValues.error("Resource amount must be positive or -1");
             } else {
                 amount = Math.min(available, requested);
             }
@@ -189,10 +179,10 @@ final class ScriptApi {
     Object storage(FactoryEndpoint endpoint, Object rawChannel) {
         var origin = FactoryResourceOrigin.endpoint(endpoint);
         var contents = host.storageContents(endpoint);
-        if (rawChannel == Undefined.instance || rawChannel == null) {
+        if (JsValues.isNullish(rawChannel)) {
             return resourceArray(origin, contents);
         }
-        var channel = resolveChannel(Context.toString(rawChannel));
+        var channel = resolveChannel(JsValues.string(rawChannel));
         return resourceArray(origin, contents.stream()
                 .filter(resource -> ScriptApi.channel(resource.key())
                         .equals(channel.getId().toString()))
@@ -218,14 +208,14 @@ final class ScriptApi {
         if (delegate instanceof JsBus bus) {
             return FactoryEndpoint.bus(bus.address());
         }
-        throw Context.reportRuntimeError("target must be a Network or Bus");
+        throw JsValues.error("target must be a Network or Bus");
     }
 
     FactoryResourceRef requireResource(Object value) {
         var delegate = binder.delegate(value);
         var resource = delegate instanceof JsResource handle ? handle.resource() : null;
         if (resource == null) {
-            throw Context.reportRuntimeError("resource must be a factory Resource handle");
+            throw JsValues.error("resource must be a factory Resource handle");
         }
         return requireResource(resource);
     }
@@ -234,7 +224,7 @@ final class ScriptApi {
         if (resource.origin().kind() == FactoryResourceOrigin.Kind.ESCROW
                 && (activeContext == null
                         || !resource.origin().escrowId().equals(activeContext.workflowId()))) {
-            throw Context.reportRuntimeError(
+            throw JsValues.error(
                     "An escrow Resource can only be used by the workflow that owns it");
         }
         return resource;
@@ -244,7 +234,7 @@ final class ScriptApi {
         var resource = requireResource(value);
         if (resource.bundle().size() != 1
                 || !(resource.bundle().getFirst().key() instanceof AEItemKey)) {
-            throw Context.reportRuntimeError("operation requires an ae2:i resource");
+            throw JsValues.error("operation requires an ae2:i resource");
         }
         return resource;
     }
@@ -287,19 +277,8 @@ final class ScriptApi {
                 .map(resource -> binder.wrap(resourceFacade(new FactoryResourceRef(
                         origin, List.of(resource)))))
                 .toArray();
-        var array = (ScriptableObject) Context.getCurrentContext().newArray(scope, values);
-        var methods = (Scriptable) binder.wrap(new JsResourceArray(
+        return binder.arrayWithMethods(values, new JsResourceArray(
                 this, new FactoryResourceRef(origin, normalized)));
-        for (var name : List.of("to", "pushExactlyInto")) {
-            array.defineProperty(
-                    name,
-                    ScriptableObject.getProperty(methods, name),
-                    ScriptableObject.READONLY
-                            | ScriptableObject.PERMANENT
-                            | ScriptableObject.DONTENUM);
-        }
-        array.sealObject();
-        return array;
     }
 
     JsTransferAction transfer(
@@ -325,9 +304,7 @@ final class ScriptApi {
     Object itemNbt(Object item) {
         var resource = requireItemResource(item);
         var key = (AEItemKey) resource.bundle().getFirst().key();
-        return NbtJs.toJs(
-                Context.getCurrentContext(), scope,
-                key.toStack(1).save(host.registries()));
+        return NbtJs.toJs(key.toStack(1).save(host.registries()));
     }
 
     boolean dropItem(com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item) {
@@ -338,7 +315,7 @@ final class ScriptApi {
     boolean useItem(
             com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object item, Object rawShift) {
         requireActiveContext("bus.use(item)");
-        var emptyHand = item == Undefined.instance || item == null || item instanceof Boolean;
+        var emptyHand = JsValues.isNullish(item) || item instanceof Boolean;
         var shift = optionalBoolean(item instanceof Boolean ? item : rawShift, "bus.use shift");
         if (emptyHand) {
             return host.use(activeContext.workflowId(), bus, shift);
@@ -358,11 +335,11 @@ final class ScriptApi {
     }
 
     private static boolean optionalBoolean(Object value, String name) {
-        if (value == Undefined.instance || value == null) {
+        if (JsValues.isNullish(value)) {
             return false;
         }
         if (!(value instanceof Boolean booleanValue)) {
-            throw Context.reportRuntimeError(name + " must be a boolean");
+            throw JsValues.error(name + " must be a boolean");
         }
         return booleanValue;
     }
@@ -371,20 +348,20 @@ final class ScriptApi {
             com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object tool) {
         requireActiveContext("bus.break(tool)");
         return host.breakBlock(
-                        activeContext.workflowId(), bus, requireItemResource(tool))
+                activeContext.workflowId(), bus, requireItemResource(tool))
                 .map(result -> resourceArray(result.origin(), result.bundle()))
                 .orElse(null);
     }
 
     Object busRedstone(
             com.fulent.appliedfactory.factory.FactoryBusAddress bus, Object level) {
-        if (level == Undefined.instance || level == null) {
+        if (JsValues.isNullish(level)) {
             return host.busRedstoneLevel(bus);
         }
-        var number = Context.toNumber(level);
+        var number = JsValues.number(level, "bus.redstone level");
         if (!Double.isFinite(number) || number != Math.rint(number)
                 || number < 0 || number > 15) {
-            throw Context.reportRuntimeError(
+            throw JsValues.error(
                     "bus.redstone(level) requires an integer level between 0 and 15");
         }
         return host.setBusRedstoneOutput(bus, (int) number);
@@ -392,7 +369,7 @@ final class ScriptApi {
 
     private void requireActiveContext(String operation) {
         if (activeContext == null) {
-            throw Context.reportRuntimeError(operation + " may only run inside a workflow");
+            throw JsValues.error(operation + " may only run inside a workflow");
         }
     }
 
@@ -403,29 +380,26 @@ final class ScriptApi {
     static AEKeyType resolveChannel(String value) {
         var id = ResourceLocation.tryParse(value);
         if (id == null) {
-            throw Context.reportRuntimeError("Invalid AE resource channel id: " + value);
+            throw JsValues.error("Invalid AE resource channel id: " + value);
         }
         try {
             return AEKeyTypes.get(id);
         } catch (IllegalArgumentException exception) {
-            throw Context.reportRuntimeError("Unknown AE resource channel: " + value);
+            throw JsValues.error("Unknown AE resource channel: " + value);
         }
     }
 
     CompoundTag optionalNbt(Object value, String name) {
-        if (value == Undefined.instance || value == null) {
+        if (JsValues.isNullish(value)) {
             return null;
         }
-        if (!(value instanceof Scriptable object)) {
-            throw Context.reportRuntimeError(name + " must be an NBT object");
-        }
-        return NbtJs.fromObject(Context.getCurrentContext(), object, name);
+        return NbtJs.fromObject(JsValues.object(value, name), name);
     }
 
     static Direction direction(String value) {
         var side = Direction.byName(value);
         if (side == null) {
-            throw Context.reportRuntimeError("Invalid direction: " + value);
+            throw JsValues.error("Invalid direction: " + value);
         }
         return side;
     }
@@ -441,21 +415,18 @@ final class ScriptApi {
             case "back" -> front.getOpposite();
             case "left" -> front.getCounterClockWise();
             case "right" -> front.getClockWise();
-            default -> throw Context.reportRuntimeError("Invalid network side: " + value);
+            default -> throw JsValues.error("Invalid network side: " + value);
         };
     }
 
-    static Object required(Scriptable object, String name) {
-        var value = ScriptableObject.getProperty(object, name);
-        if (value == Scriptable.NOT_FOUND || value == Undefined.instance) {
-            throw Context.reportRuntimeError("Missing property: " + name);
-        }
-        return value;
+    static Object required(Value object, String name) {
+        return JsValues.required(object, name);
     }
 }
 
 @JsBridge
-final class JsGlobals {    private final ScriptApi api;
+final class JsGlobals {
+    private final ScriptApi api;
 
     JsGlobals(ScriptApi api) {
         this.api = api;
@@ -469,47 +440,45 @@ final class JsGlobals {    private final ScriptApi api;
         return new JsSleepAction(new FactorySleepAction(ticks));
     }
 
-    public Object go(Function factory) {
+    public Object go(Value factory) {
         api.registration().requireOpen();
         api.registration().passiveHandlers.add(factory);
-        return Undefined.instance;
+        return null;
     }
 
-    public Object registerProcessingPattern(Object definitions, Function handler) {
+    public Object registerProcessingPattern(Object definitions, Value handler) {
         api.registration().requireOpen();
-        if (!(definitions instanceof NativeArray array)) {
-            throw Context.reportRuntimeError("registerProcessingPattern requires an array");
-        }
+        var array = JsValues.array(definitions, "registerProcessingPattern definitions");
         var handlerIndex = api.registration().patternHandlers.size();
         api.registration().patternHandlers.add(handler);
-        for (long index = 0; index < array.getLength(); index++) {
-            var value = array.get((int) index, array);
-            if (!(value instanceof Scriptable definition)) {
-                throw Context.reportRuntimeError("Pattern definition must be an object");
-            }
-            var side = api.networkSide(Context.toString(
+        for (long index = 0; index < array.getArraySize(); index++) {
+            var definition = JsValues.object(array.getArrayElement(index), "Pattern definition");
+            var side = api.networkSide(JsValues.string(
                     ScriptApi.required(definition, "orderNetwork")));
             var inputs = specs(ScriptApi.required(definition, "inputs"), "inputs");
             var outputs = specs(ScriptApi.required(definition, "outputs"), "outputs");
             if (inputs.isEmpty() || outputs.isEmpty()) {
-                throw Context.reportRuntimeError("Processing patterns require inputs and outputs");
+                throw JsValues.error("Processing patterns require inputs and outputs");
             }
             var encoded = PatternDetailsHelper.encodeProcessingPattern(
                     genericStacks(inputs), genericStacks(outputs));
             api.registration().patterns.add(new CompiledControllerProgram.ScriptPattern(
                     side, encoded, handlerIndex));
         }
-        return Undefined.instance;
+        return null;
     }
 
     public Object rename(Object item, String name) {
         return api.renameItem(item, name);
     }
 
-    /** Prints a message to this controller's log subscribers (chat) and the server log. */
+    /**
+     * Prints a message to this controller's log subscribers (chat) and the server
+     * log.
+     */
     public Object log(String message) {
         api.host().log(message);
-        return Undefined.instance;
+        return null;
     }
 
     public Object itemNbt(Object item) {
@@ -519,7 +488,7 @@ final class JsGlobals {    private final ScriptApi api;
     public JsResourceSpec item(String id, long amount, Object components) {
         var resourceId = ResourceLocation.tryParse(id);
         if (resourceId == null) {
-            throw Context.reportRuntimeError("Invalid item id: " + id);
+            throw JsValues.error("Invalid item id: " + id);
         }
         var key = new CompoundTag();
         key.putString("id", resourceId.toString());
@@ -531,12 +500,10 @@ final class JsGlobals {    private final ScriptApi api;
     }
 
     public JsResourceSpec stack(String channel, Object rawKey, long amount) {
-        if (!(rawKey instanceof Scriptable keyObject)) {
-            throw Context.reportRuntimeError("stack key must be an NBT object");
-        }
+        var keyObject = JsValues.object(rawKey, "stack key");
         return spec(
                 ScriptApi.resolveChannel(channel),
-                NbtJs.fromObject(Context.getCurrentContext(), keyObject, "key"),
+                NbtJs.fromObject(keyObject, "key"),
                 amount);
     }
 
@@ -544,19 +511,17 @@ final class JsGlobals {    private final ScriptApi api;
         requireAmount(amount);
         var key = channel.loadKeyFromTag(api.host().registries(), keyTag);
         if (key == null) {
-            throw Context.reportRuntimeError(
+            throw JsValues.error(
                     "Invalid key for AE resource channel " + channel.getId());
         }
         return new JsResourceSpec(api, key, amount);
     }
 
     private List<FactoryResource> specs(Object value, String name) {
-        if (!(value instanceof NativeArray array)) {
-            throw Context.reportRuntimeError(name + " must be an array");
-        }
+        var array = JsValues.array(value, name);
         var result = new ArrayList<FactoryResource>();
-        for (long index = 0; index < array.getLength(); index++) {
-            result.add(spec(array.get((int) index, array), name));
+        for (long index = 0; index < array.getArraySize(); index++) {
+            result.add(spec(JsValues.toHost(array.getArrayElement(index)), name));
         }
         return FactoryResourceRef.normalize(result);
     }
@@ -571,36 +536,35 @@ final class JsGlobals {    private final ScriptApi api;
         var delegate = api.delegate(raw);
         if (delegate instanceof JsResourceSpec spec) {
             if (spec.amount() <= 0) {
-                throw Context.reportRuntimeError(name + " requires exact positive resource specs");
+                throw JsValues.error(name + " requires exact positive resource specs");
             }
             return new FactoryResource(spec.key(), spec.amount());
         }
-        if (raw instanceof Scriptable object) {
-            var rawChannel = ScriptableObject.getProperty(object, "channel");
-            if (rawChannel != Scriptable.NOT_FOUND && rawChannel != Undefined.instance) {
-                var rawKey = ScriptableObject.getProperty(object, "key");
-                var rawAmount = ScriptableObject.getProperty(object, "amount");
-                if (rawKey instanceof Scriptable keyObject
-                        && rawAmount != Scriptable.NOT_FOUND && rawAmount != Undefined.instance) {
-                    var channel = ScriptApi.resolveChannel(Context.toString(rawChannel));
+        if (raw instanceof Value object && object.hasMembers()) {
+            if (object.hasMember("channel")) {
+                var rawChannel = object.getMember("channel");
+                var rawKey = object.getMember("key");
+                var rawAmount = object.getMember("amount");
+                if (rawKey != null && rawKey.hasMembers() && rawAmount != null && !rawAmount.isNull()) {
+                    var channel = ScriptApi.resolveChannel(JsValues.string(rawChannel));
                     var key = channel.loadKeyFromTag(
                             api.host().registries(),
-                            NbtJs.fromObject(Context.getCurrentContext(), keyObject, name + ".key"));
+                            NbtJs.fromObject(rawKey, name + ".key"));
                     if (key == null) {
-                        throw Context.reportRuntimeError(
+                        throw JsValues.error(
                                 name + " has an invalid key for channel " + channel.getId());
                     }
-                    var amount = Context.toNumber(rawAmount);
+                    var amount = JsValues.number(rawAmount, name + ".amount");
                     if (!Double.isFinite(amount) || amount != Math.rint(amount)
                             || amount <= 0) {
-                        throw Context.reportRuntimeError(
+                        throw JsValues.error(
                                 name + " requires exact positive resource amounts");
                     }
                     return new FactoryResource(key, (long) amount);
                 }
             }
         }
-        throw Context.reportRuntimeError(name + " requires resource specs");
+        throw JsValues.error(name + " requires resource specs");
     }
 
     private static List<GenericStack> genericStacks(List<FactoryResource> resources) {
@@ -611,7 +575,7 @@ final class JsGlobals {    private final ScriptApi api;
 
     private static void requireAmount(long amount) {
         if (amount != -1 && amount <= 0) {
-            throw Context.reportRuntimeError("Resource amount must be positive or -1");
+            throw JsValues.error("Resource amount must be positive or -1");
         }
     }
 }
@@ -643,9 +607,7 @@ final class JsResourceSpec {
 
     @JsProperty
     public Object getKey() {
-        return NbtJs.toJs(
-                Context.getCurrentContext(), api.scope(),
-                key.toTag(api.host().registries()));
+        return NbtJs.toJs(key.toTag(api.host().registries()));
     }
 
     @JsProperty
@@ -685,12 +647,14 @@ final class JsNetwork {
                 .toList();
     }
 
-    public Object onChange(Function callback) {
+    public Object onChange(Value callback) {
         api.addTopologyListener(side, callback);
-        return Undefined.instance;
+        return null;
     }
 
-    /** Compares the live AE grid objects; disconnected sides never compare equal. */
+    /**
+     * Compares the live AE grid objects; disconnected sides never compare equal.
+     */
     public boolean isSameNetwork(JsNetwork other) {
         return api.host().isSameNetwork(side, other.side);
     }
@@ -741,13 +705,13 @@ final class JsBus {
         var position = address.hostPosition().relative(address.side());
         if (target == null || !target.isLoaded()) {
             return new JsBlockView(
-                    api, "minecraft:air", "minecraft:air",
+                    "minecraft:air", "minecraft:air",
                     position.getX(), position.getY(), position.getZ(), Map.of(), null, null);
         }
         var state = target.blockState();
         var blockEntityType = target.blockEntityTypeId();
         return new JsBlockView(
-                api, target.blockId().toString(), state.toString(),
+                target.blockId().toString(), state.toString(),
                 position.getX(), position.getY(), position.getZ(),
                 blockStateProperties(state),
                 blockEntityType == null ? null : blockEntityType.toString(),
@@ -756,8 +720,7 @@ final class JsBus {
 
     private static Map<String, Object> blockStateProperties(BlockState state) {
         var result = new LinkedHashMap<String, Object>();
-        state.getValues().forEach((property, value) ->
-                result.put(property.getName(), exposePropertyValue(value)));
+        state.getValues().forEach((property, value) -> result.put(property.getName(), exposePropertyValue(value)));
         return result;
     }
 
@@ -791,7 +754,10 @@ final class JsBus {
         return api.placeItem(address, resource, shift);
     }
 
-    /** JS name is {@code break}; the Java name stays breakBlock because break is a keyword. */
+    /**
+     * JS name is {@code break}; the Java name stays breakBlock because break is a
+     * keyword.
+     */
     @JsName("break")
     public Object breakBlock(Object tool) {
         return api.breakBlock(address, tool);
@@ -805,7 +771,6 @@ final class JsBus {
 
 @JsBridge
 final class JsBlockView {
-    private final ScriptApi api;
     private final String id;
     private final String state;
     private final int x;
@@ -816,7 +781,6 @@ final class JsBlockView {
     private final CompoundTag nbt;
 
     JsBlockView(
-            ScriptApi api,
             String id,
             String state,
             int x,
@@ -825,7 +789,6 @@ final class JsBlockView {
             Map<String, Object> properties,
             String blockEntityType,
             CompoundTag nbt) {
-        this.api = api;
         this.id = id;
         this.state = state;
         this.x = x;
@@ -875,7 +838,7 @@ final class JsBlockView {
     public Object getNbt() {
         return nbt == null
                 ? null
-                : NbtJs.toJs(Context.getCurrentContext(), api.scope(), nbt);
+                : NbtJs.toJs(nbt);
     }
 
     public boolean isSameBlock(JsBlockView other) {
@@ -919,9 +882,7 @@ final class JsResource {
 
     @JsProperty
     public Object getKey() {
-        return NbtJs.toJs(
-                Context.getCurrentContext(), api.scope(),
-                resource.bundle().getFirst().key().toTag(api.host().registries()));
+        return NbtJs.toJs(resource.bundle().getFirst().key().toTag(api.host().registries()));
     }
 
     public JsTransferAction to(Object target) {
@@ -1005,7 +966,10 @@ final class JsOrder {
     }
 }
 
-/** {@code console.log/warn/error} convenience mirror of the {@code log()} global. */
+/**
+ * {@code console.log/warn/error} convenience mirror of the {@code log()}
+ * global.
+ */
 @JsBridge
 final class JsConsole {
     private final FactoryProgram.Host host;
@@ -1016,16 +980,16 @@ final class JsConsole {
 
     public Object log(String message) {
         host.log(message);
-        return Undefined.instance;
+        return null;
     }
 
     public Object warn(String message) {
         host.log(message);
-        return Undefined.instance;
+        return null;
     }
 
     public Object error(String message) {
         host.log(message);
-        return Undefined.instance;
+        return null;
     }
 }

@@ -1,7 +1,7 @@
 package com.fulent.appliedfactory.script;
 
-import org.mozilla.javascript.Scriptable;
+import org.graalvm.polyglot.Value;
 
-/** Live Rhino generator. Deliberately in-memory only. */
-public record ScriptWorkflow(Scriptable generator) {
+/** Live GraalJS generator. Deliberately in-memory only. */
+public record ScriptWorkflow(Value generator) {
 }

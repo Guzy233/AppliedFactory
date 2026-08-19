@@ -1,179 +1,286 @@
 package com.fulent.appliedfactory.mcp;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.LinkedHashMap;
+import java.util.List;
 
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.HostAccess;
+import org.graalvm.polyglot.PolyglotException;
+import org.graalvm.polyglot.Source;
+import org.graalvm.polyglot.io.IOAccess;
 import org.jetbrains.annotations.Nullable;
 
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.google.gson.JsonSyntaxException;
+import com.fulent.appliedfactory.AppliedFactory;
 
 import net.minecraft.client.Minecraft;
 
-import org.mozilla.javascript.Parser;
-import org.mozilla.javascript.ast.AstRoot;
-import org.mozilla.javascript.ast.FunctionCall;
-import org.mozilla.javascript.ast.Name;
-import org.mozilla.javascript.ast.StringLiteral;
-
-/**
- * Client-side source bundler for MCP scripts and controller-editor saves:
- * resolves {@code include("file")} calls by textually inlining the target file's
- * content, recursively, so long recipe/data files can live separately in the
- * appliedscripts workspace while the controller still receives one source. After
- * inlining, {@code require_recipes(filter)} calls are expanded by
- * {@link RecipeMacroExpander} against the workspace's
- * {@code processing_recipes.json}, so baked recipe data is selected by the
- * filter at bundle time instead of in the script.
- *
- * <p>{@code include("file")} has one extension-independent meaning, matching C++
- * {@code #include}: the call itself is replaced with the target's raw text. The caller is
- * responsible for putting the include where that text is valid JavaScript or data.
- */
+/** Client-side TypeScript precompiler for controller and MCP scripts. */
 public final class ScriptBundler {
-    private static final int MAX_DEPTH = 16;
+    private static final String TYPESCRIPT_RESOURCE =
+            "/assets/appliedfactory/compiler/typescript.js";
+    private static final Object COMPILER_LOCK = new Object();
+    private static Context compilerContext;
+
+    private static final String COMPILER_HELPER = """
+            globalThis.__afScan = function(source) {
+              const sf = ts.createSourceFile("controller.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+              if (sf.parseDiagnostics.length) {
+                const d = sf.parseDiagnostics[0];
+                return JSON.stringify({ error: ts.flattenDiagnosticMessageText(d.messageText, "\\n") });
+              }
+              const edits = [];
+              let error = null;
+              const fail = message => { if (error === null) error = message; };
+              const literalStrings = (node, key) => {
+                if (ts.isStringLiteral(node)) return [node.text];
+                if (ts.isArrayLiteralExpression(node)) {
+                  const values = [];
+                  for (const item of node.elements) {
+                    if (!ts.isStringLiteral(item)) {
+                      fail(`require_recipes() filter "${key}" must contain only strings`);
+                      return [];
+                    }
+                    values.push(item.text);
+                  }
+                  return values;
+                }
+                fail(`require_recipes() filter "${key}" must be a string or an array of strings`);
+                return [];
+              };
+              for (const statement of sf.statements) {
+                if (ts.isImportDeclaration(statement)) {
+                  const clause = statement.importClause;
+                  const specifier = ts.isStringLiteral(statement.moduleSpecifier)
+                    ? statement.moduleSpecifier.text : "";
+                  if (!clause || clause.isTypeOnly || !clause.name || clause.namedBindings || !specifier.endsWith(".json")) {
+                    fail('Only default JSON imports are supported, e.g. import data from "./data.json"');
+                  } else {
+                    edits.push({ kind: "json", start: statement.getStart(sf), end: statement.end,
+                      name: clause.name.text, path: specifier });
+                  }
+                } else if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)
+                    || (statement.modifiers && statement.modifiers.some(m => m.kind === ts.SyntaxKind.ExportKeyword))) {
+                  fail("TypeScript modules are not supported yet; only default JSON imports are allowed");
+                }
+              }
+              const visit = node => {
+                if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+                  fail("Dynamic import() is not supported");
+                }
+                if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+                    && node.expression.text === "require_recipes") {
+                  if (node.arguments.length > 1) {
+                    fail("require_recipes() takes at most one filter object");
+                  } else {
+                    const filter = {};
+                    const argument = node.arguments[0];
+                    if (argument && !ts.isObjectLiteralExpression(argument)) {
+                      fail("require_recipes() filter must be an object literal");
+                    } else if (argument) {
+                      for (const property of argument.properties) {
+                        if (!ts.isPropertyAssignment(property)
+                            || !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
+                          fail("require_recipes() filter must contain plain name: value pairs");
+                          break;
+                        }
+                        const key = property.name.text;
+                        if (!["id", "type", "machine", "input", "output"].includes(key)) {
+                          fail(`require_recipes(): unknown filter key "${key}"`);
+                          break;
+                        }
+                        filter[key] = literalStrings(property.initializer, key);
+                      }
+                    }
+                    edits.push({ kind: "recipes", start: node.getStart(sf), end: node.end, filter });
+                  }
+                }
+                ts.forEachChild(node, visit);
+              };
+              visit(sf);
+              return JSON.stringify(error === null ? { edits } : { error });
+            };
+            globalThis.__afTranspile = function(source) {
+              const result = ts.transpileModule(source, {
+                fileName: "controller.ts",
+                reportDiagnostics: true,
+                compilerOptions: {
+                  target: ts.ScriptTarget.ES2022,
+                  module: ts.ModuleKind.None,
+                  isolatedModules: true,
+                  removeComments: false
+                }
+              });
+              const errors = (result.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error);
+              return JSON.stringify(errors.length
+                ? { error: ts.flattenDiagnosticMessageText(errors[0].messageText, "\\n") }
+                : { code: result.outputText });
+            };
+            """;
 
     private ScriptBundler() {
     }
 
-    /** Root directory of client-authored scripts and generated recipe data. */
     public static Path workspaceDir() {
         return Minecraft.getInstance().gameDirectory.toPath().resolve("appliedscripts");
     }
 
-    /**
-     * Resolves a file name against the appliedscripts workspace. Absolute paths
-     * win, then the including file's directory (when {@code baseDir} is set), the
-     * game directory's appliedscripts/ and root, and finally the process working
-     * directory's appliedscripts/ and root.
-     */
     @Nullable
     public static Path resolveFile(String file, @Nullable Path baseDir) {
-        var given = Path.of(file);
-        var candidates = new ArrayList<Path>();
-        if (given.isAbsolute()) {
-            candidates.add(given);
+        if (file == null || file.isBlank()) {
+            return null;
         }
-        if (baseDir != null) {
-            candidates.add(baseDir.resolve(file));
-        }
-        var gameDir = Minecraft.getInstance().gameDirectory.toPath();
-        candidates.add(workspaceDir().resolve(file));
-        candidates.add(gameDir.resolve(file));
-        var cwd = Path.of("").toAbsolutePath();
-        candidates.add(cwd.resolve("appliedscripts").resolve(file));
-        candidates.add(cwd.resolve(file));
-        for (var candidate : candidates) {
-            if (Files.isRegularFile(candidate)) {
-                return candidate;
+        try {
+            var root = workspaceDir().toAbsolutePath().normalize();
+            var base = baseDir == null ? root : baseDir.toAbsolutePath().normalize();
+            var given = Path.of(file.replace('/', java.io.File.separatorChar));
+            if (given.isAbsolute()) {
+                return null;
             }
+            var resolved = base.resolve(given).normalize();
+            return resolved.startsWith(root) && Files.isRegularFile(resolved) ? resolved : null;
+        } catch (RuntimeException exception) {
+            return null;
         }
-        return null;
     }
 
-    /** Bundles include() directives and expands require_recipes() macros. */
     public static String bundle(String source, @Nullable Path baseDir) throws McpToolException {
-        return RecipeMacroExpander.expand(bundle(source, baseDir, new HashSet<>(), 0), baseDir);
+        synchronized (COMPILER_LOCK) {
+            var scan = invoke("__afScan", source);
+            var edits = parseEdits(scan, baseDir);
+            var expanded = apply(source, edits);
+            var result = invoke("__afTranspile", expanded);
+            if (result.has("error")) {
+                throw new McpToolException(-32602, "TypeScript compile failed: "
+                        + result.get("error").getAsString());
+            }
+            return result.get("code").getAsString();
+        }
     }
 
-    /**
-     * Bundles inline source as a virtual file located in the appliedscripts
-     * workspace root. Used by MCP inline scripts and the controller editor.
-     */
     public static String bundleFromWorkspaceRoot(String source) throws McpToolException {
         return bundle(source, workspaceDir());
     }
 
-    private static String bundle(
-            String source, @Nullable Path baseDir, Set<String> chain, int depth)
+    public static void requireTypeScriptEntry(String path) throws McpToolException {
+        var normalized = path == null ? "" : path.toLowerCase(java.util.Locale.ROOT);
+        if (!normalized.endsWith(".ts") || normalized.endsWith(".d.ts")) {
+            throw new McpToolException(-32602,
+                    "Controller entry file must be a .ts file (declaration files cannot execute)");
+        }
+    }
+
+    private static List<Edit> parseEdits(JsonObject scan, @Nullable Path baseDir)
             throws McpToolException {
-        if (depth > MAX_DEPTH) {
-            throw new McpToolException(-32602, "include() nesting exceeds " + MAX_DEPTH);
+        if (scan.has("error")) {
+            throw new McpToolException(-32602, "TypeScript precompile failed: "
+                    + scan.get("error").getAsString());
         }
-        AstRoot ast;
-        try {
-            ast = new Parser().parse(source, "<factory script>", 1);
-        } catch (RuntimeException exception) {
-            throw new McpToolException(-32602, "script parse failed: " + exception.getMessage());
-        }
-        var includes = new ArrayList<Include>();
-        ast.visitAll(node -> {
-            if (node instanceof FunctionCall call
-                    && call.getTarget() instanceof Name name
-                    && "include".equals(name.getIdentifier())
-                    && call.getArguments().size() == 1
-                    && call.getArguments().get(0) instanceof StringLiteral literal) {
-                var target = literal.getValue();
-                includes.add(new Include(
-                        call.getAbsolutePosition(), call.getLength(), target));
+        var edits = new ArrayList<Edit>();
+        for (var element : scan.getAsJsonArray("edits")) {
+            var edit = element.getAsJsonObject();
+            String replacement;
+            if ("json".equals(edit.get("kind").getAsString())) {
+                var requested = edit.get("path").getAsString();
+                if (!(requested.startsWith("./") || requested.startsWith("../"))) {
+                    throw new McpToolException(-32602,
+                            "JSON import must use a relative path: " + requested);
+                }
+                var path = resolveFile(requested, baseDir);
+                if (path == null) {
+                    throw new McpToolException(-32602, "JSON import not found: " + requested);
+                }
+                replacement = "const " + edit.get("name").getAsString() + " = "
+                        + readJson(path, requested) + ";";
+            } else {
+                var filter = new LinkedHashMap<String, List<String>>();
+                for (var entry : edit.getAsJsonObject("filter").entrySet()) {
+                    var values = new ArrayList<String>();
+                    entry.getValue().getAsJsonArray().forEach(value -> values.add(value.getAsString()));
+                    filter.put(entry.getKey(), List.copyOf(values));
+                }
+                replacement = RecipeMacroExpander.expandFilter(filter, baseDir);
             }
-            return true;
-        });
-        if (includes.isEmpty()) {
-            return source;
+            edits.add(new Edit(edit.get("start").getAsInt(), edit.get("end").getAsInt(), replacement));
         }
-        includes.sort(Comparator.comparingInt(Include::offset));
-        var result = new StringBuilder();
-        int cursor = 0;
-        for (var include : includes) {
-            if (include.offset() < cursor) {
-                throw new McpToolException(-32602, "overlapping include() statements");
+        edits.sort(Comparator.comparingInt(Edit::start).reversed());
+        return edits;
+    }
+
+    private static String apply(String source, List<Edit> edits) throws McpToolException {
+        var result = new StringBuilder(source);
+        int previousStart = source.length();
+        for (var edit : edits) {
+            if (edit.end() > previousStart || edit.start() < 0 || edit.end() > source.length()) {
+                throw new McpToolException(-32602, "Overlapping TypeScript precompile edits");
             }
-            result.append(source, cursor, include.offset());
-            result.append(load(include.target(), baseDir, chain, depth));
-            cursor = include.offset() + include.length();
+            result.replace(edit.start(), edit.end(), edit.replacement());
+            previousStart = edit.start();
         }
-        result.append(source, cursor, source.length());
         return result.toString();
     }
 
-    private static String load(
-            String name, @Nullable Path baseDir, Set<String> chain, int depth)
-            throws McpToolException {
-        var path = resolveFile(name, baseDir);
-        if (path == null) {
-            throw new McpToolException(-32602, "include file not found: " + name
-                    + (baseDir == null ? "" : " (base " + baseDir + ")"));
-        }
-        String content;
+    private static String readJson(Path path, String requested) throws McpToolException {
         try {
-            content = Files.readString(path, StandardCharsets.UTF_8);
-        } catch (IOException exception) {
+            var text = Files.readString(path, StandardCharsets.UTF_8);
+            return JsonParser.parseString(text).toString();
+        } catch (IOException | RuntimeException exception) {
             throw new McpToolException(-32602,
-                    "failed to read include " + name + ": " + exception.getMessage());
+                    "Invalid JSON import " + requested + ": " + messageOf(exception));
         }
-        var key = path.toAbsolutePath().normalize().toString();
-        if (!chain.add(key)) {
-            throw new McpToolException(-32602, "include cycle: " + name);
-        }
+    }
+
+    private static JsonObject invoke(String function, String source) throws McpToolException {
         try {
-            // A JSON object is not a standalone JavaScript program, but textual inclusion
-            // still makes it valid when the call occurs in an expression. JSON cannot carry
-            // another include directive, so it needs no recursive pass.
-            if (isJsonDocument(content)) {
-                return content;
+            var context = compilerContext();
+            var json = context.getBindings("js").getMember(function).execute(source).asString();
+            return JsonParser.parseString(json).getAsJsonObject();
+        } catch (RuntimeException exception) {
+            throw new McpToolException(-32602,
+                    "TypeScript compiler failed: " + messageOf(exception));
+        }
+    }
+
+    private static Context compilerContext() throws McpToolException {
+        if (compilerContext != null) {
+            return compilerContext;
+        }
+        try (InputStream stream = ScriptBundler.class.getResourceAsStream(TYPESCRIPT_RESOURCE)) {
+            if (stream == null) {
+                throw new IOException("missing bundled " + TYPESCRIPT_RESOURCE);
             }
-            return bundle(content, path.getParent(), chain, depth + 1);
-        } finally {
-            chain.remove(key);
+            var typescript = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            var context = Context.newBuilder("js")
+                    .allowHostAccess(HostAccess.NONE)
+                    .allowHostClassLookup(ignored -> false)
+                    .allowIO(IOAccess.NONE)
+                    .allowCreateThread(false)
+                    .build();
+            context.eval(Source.newBuilder("js", typescript, "typescript.js").buildLiteral());
+            context.eval(Source.newBuilder("js", COMPILER_HELPER, "appliedfactory-ts-helper.js")
+                    .buildLiteral());
+            compilerContext = context;
+            return context;
+        } catch (IOException | PolyglotException exception) {
+            AppliedFactory.LOGGER.warn("Unable to initialize the embedded TypeScript compiler", exception);
+            throw new McpToolException(-32602,
+                    "Unable to initialize TypeScript compiler: " + messageOf(exception));
         }
     }
 
-    private static boolean isJsonDocument(String content) {
-        try {
-            JsonParser.parseString(content);
-            return true;
-        } catch (JsonSyntaxException ignored) {
-            return false;
-        }
+    private static String messageOf(Throwable throwable) {
+        return throwable.getMessage() == null ? throwable.getClass().getSimpleName()
+                : throwable.getMessage();
     }
 
-    private record Include(int offset, int length, String target) {
+    private record Edit(int start, int end, String replacement) {
     }
 }

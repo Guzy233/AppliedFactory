@@ -24,7 +24,7 @@ import appeng.api.stacks.AEKey;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 
-/** Owns one compiled Rhino scope and its non-persistent generator jobs. */
+/** Owns one compiled GraalJS context and its non-persistent generator jobs. */
 public final class FactoryProgram {
     public static final int MAX_JOBS = 64;
     private static final int MAX_IMMEDIATE_TRANSITIONS_PER_TICK = 128;
@@ -265,6 +265,7 @@ public final class FactoryProgram {
         jobs.clear();
         stoppedPassives.clear();
         pendingCancellations.clear();
+        runtime.close();
     }
 
     private void processCancellations() {

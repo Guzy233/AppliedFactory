@@ -2,7 +2,7 @@
  * Applied Factory 脚本 API —— 权威类型与签名参考。
  *
  * 类型和签名以此文件为准，appliedscripts/SCRIPT_API.md 只描述运行模型与行为语义。
- * 控制器脚本在 Rhino ES6 编译模式下于控制器加载时求值一次：脚本用全局函数
+ * 控制器脚本由客户端转译为 ES2022 JavaScript，再由 GraalJS 在控制器加载时求值一次：脚本用全局函数
  * 取得句柄、注册 processing pattern，并通过 `go` 启动被动 generator workflow。
  */
 
@@ -262,9 +262,3 @@ interface RecipeFilter {
  * 展开为 []；processing_recipes.json 缺失或过滤器非法时打包报错。
  */
 declare function require_recipes(filter?: RecipeFilter): readonly Recipe[];
-
-/**
- * 将外部文件包含进脚本
- * @param file 要导入的文件名，路径相对脚本文件寻址
- */
-declare function include(file);

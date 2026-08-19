@@ -4,7 +4,7 @@
 
 ## 1. 运行模型
 
-控制器脚本使用 Rhino ES6 编译模式。脚本在控制器加载时求值一次，用全局函数取得句柄、注册 processing pattern，并启动 generator workflow。
+控制器源文件使用 TypeScript。客户端在上传前展开 JSON 导入与配方宏并转译为 ES2022 JavaScript，控制器再用 GraalJS 求值一次，通过全局函数取得句柄、注册 processing pattern，并启动 generator workflow。完整类型检查由 IDE 负责，上传阶段只保证语法可转译。
 
 ```js
 const production = network("front");
@@ -257,7 +257,7 @@ go(function* () {
 
 `require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数。将脚本上传前，客户端会读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量。控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`。
 
-控制器页面从左侧文件管理器选择 `appliedscripts/` 内的本地文件；上传时先保存本地原始源码，再按该文件所在目录解析 `require_recipes()` 和 `include()`。服务器同时保存用于显示/拉取的原始源码和仅用于执行的展开源码。没有本地文件备份时禁止上传。
+控制器页面从左侧文件管理器选择 `appliedscripts/` 内的本地文件；上传时先保存本地原始源码，再按该文件所在目录解析 `require_recipes()` 和 JSON 默认导入。服务器同时保存用于显示/拉取的 TypeScript 源码和仅用于执行的 JavaScript。没有本地文件备份时禁止上传。
 
 每个配方条目为 `{id, type, inputs, outputs, json}`：`inputs`/`outputs` 是 `{channel, key, amount}` 资源声明（与 `stack()` 同形），可以直接引用到 `registerProcessingPattern`；`json` 保留原始配方 JSON 作为只读参考。
 
@@ -297,8 +297,12 @@ registerProcessingPattern(
 - `registerProcessingPattern` 的 `inputs`/`outputs` 接受 `stack()`/`item()` 句柄，也接受普通 `{channel, key, amount}` 对象（与 `Recipe.inputs`/`outputs` 同形，可直接引用）；
 - 展开后的源码仍受 128k 程序上限约束，过滤器应尽量收窄到实际需要的配方。
 
-## 9.一般数据获取方法
+## 9. JSON 数据导入
 
-`include(file)` 是**客户端预编译宏**，行为类似 C++ 的 `#include`：无论目标扩展名是什么，调用文本都会被目标文件原文替换。JSON 文件本身可作为表达式使用，所以 `let data = include("data.json");` 合法；一般 JS 文件则推荐直接使用 `include("helper.js");`。
+目前只支持 TypeScript 的相对路径 JSON 默认导入：
 
-相对路径按包含者所在目录计算。MCP 的内联源码和控制器 GUI 输入都视为 `appliedscripts/` 根目录中的虚拟文件；MCP 的 `file` 源码以该文件所在目录为根；嵌套 `include()` 则以被包含文件所在目录继续解析。若配方过多而不适合直接使用 `require_recipes`，也可先烘焙成较短的数据文件后 `include`。
+```ts
+import recipes from "./data/recipes.json";
+```
+
+IDE 通过 `resolveJsonModule` 根据 JSON 内容提供字段补全。上传时客户端将导入声明替换为内嵌常量，因此服务器不需要对应文件。路径按入口 TypeScript 文件所在目录解析，并且不能离开 `appliedscripts/`。不支持命名导入、动态 `import()`、绝对路径以及 TypeScript/JavaScript 模块导入；这些形式会在预编译阶段直接报错。

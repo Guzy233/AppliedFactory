@@ -220,15 +220,15 @@ public final class McpTools {
      * relative to the appliedscripts workspace) takes precedence over the inline
      * {@code inlineName} argument, so long scripts with baked recipes can live in
      * files instead of the tool call. Production upload has a separate file-only path.
-     * {@code include("file")} calls are resolved
-     * as textual substitutions against the workspace before sending, and
-     * {@code require_recipes(filter)} calls are expanded to recipe literals.
+     * Relative default JSON imports and {@code require_recipes(filter)} calls are
+     * expanded before TypeScript is transpiled to executable JavaScript.
      */
     private static String scriptSource(JsonObject arguments, String inlineName)
             throws McpToolException {
         String bundled;
         if (arguments.has("file")) {
             var file = arguments.get("file").getAsString();
+            ScriptBundler.requireTypeScriptEntry(file);
             var path = ScriptBundler.resolveFile(file, null);
             if (path == null) {
                 throw new McpToolException(-32602,
@@ -241,9 +241,9 @@ public final class McpTools {
             throw new McpToolException(-32602, inlineName + " (inline) or file is required");
         }
         if (!ControllerProgram.isWithinLimit(bundled)) {
-            throw new McpToolException(-32602, "bundled source exceeds "
-                    + ControllerProgram.MAX_SOURCE_LENGTH + " chars after include()/require_recipes()"
-                    + " expansion; narrow the require_recipes filters (or trim include()s)");
+            throw new McpToolException(-32602, "compiled source exceeds "
+                    + ControllerProgram.MAX_SOURCE_LENGTH
+                    + " chars; narrow recipe filters or imported JSON data");
         }
         return bundled;
     }
@@ -256,6 +256,7 @@ public final class McpTools {
                     "file is required; controller programs cannot be uploaded without a local backup");
         }
         var requested = arguments.get("file").getAsString();
+        ScriptBundler.requireTypeScriptEntry(requested);
         var path = ScriptBundler.resolveFile(requested, null);
         if (path == null) {
             throw new McpToolException(-32602,
