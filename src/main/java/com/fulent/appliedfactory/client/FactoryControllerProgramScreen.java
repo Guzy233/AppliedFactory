@@ -3,7 +3,6 @@ package com.fulent.appliedfactory.client;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 import com.fulent.appliedfactory.mcp.McpClientManager;
 import com.fulent.appliedfactory.mcp.McpToolException;
@@ -18,8 +17,8 @@ import com.fulent.appliedfactory.script.ControllerProgram;
 
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.components.Checkbox;
 import net.minecraft.client.gui.components.MultiLineEditBox;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Inventory;
@@ -31,14 +30,13 @@ public final class FactoryControllerProgramScreen
     private static final int MAX_WIDTH = 920;
     private static final int MAX_HEIGHT = 560;
     private static final int MARGIN = 10;
-    private static final int HEADER_HEIGHT = 50;
+    private static final int HEADER_HEIGHT = 28;
     private static final int FILES_WIDTH = 190;
     private static final int FILE_ROW_HEIGHT = 19;
 
-    private final UUID viewerId;
     private final List<Button> fileButtons = new ArrayList<>();
     private MultiLineEditBox scriptBox;
-    private Checkbox logSubscription;
+    private Button logButton;
     private Button uploadButton;
     private Button pullButton;
     private Button mcpButton;
@@ -47,6 +45,7 @@ public final class FactoryControllerProgramScreen
     private String remotePath = "";
     private String remoteSource = ControllerProgram.DEFAULT_SOURCE;
     private boolean sourceLoaded;
+    private boolean logSubscribed;
     private int filePage;
     private Component saveStatus = Component.empty();
     private int saveStatusColor = 0xffa9d8e9;
@@ -54,7 +53,7 @@ public final class FactoryControllerProgramScreen
     public FactoryControllerProgramScreen(
             FactoryControllerProgramMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
-        viewerId = inventory.player.getUUID();
+        logSubscribed = menu.isLogSubscribed(inventory.player.getUUID());
     }
 
     @Override
@@ -77,23 +76,24 @@ public final class FactoryControllerProgramScreen
         addRenderableWidget(scriptBox);
 
         uploadButton = addRenderableWidget(Button.builder(
-                Component.translatable("gui.appliedfactory.upload_precompiled"),
+                Component.literal("↑"),
                 ignored -> uploadProgram())
-                .bounds(leftPos + imageWidth - 106, topPos + 5, 100, 18).build());
-        pullButton = addRenderableWidget(Button.builder(
-                Component.translatable("gui.appliedfactory.pull_local"),
-                ignored -> pullRemoteProgram())
-                .bounds(leftPos + imageWidth - 212, topPos + 5, 100, 18).build());
+                .tooltip(Tooltip.create(Component.translatable(
+                        "gui.appliedfactory.upload_precompiled")))
+                .bounds(leftPos + imageWidth - 25, topPos + 5, 19, 18).build());
         mcpButton = addRenderableWidget(Button.builder(
-                Component.translatable("gui.appliedfactory.bind_mcp"), ignored -> onMcpButton())
-                .bounds(leftPos + imageWidth - 274, topPos + 5, 56, 18).build());
-
-        logSubscription = addRenderableWidget(Checkbox.builder(
-                        Component.translatable("gui.appliedfactory.subscribe_logs"), font)
-                .pos(leftPos + MARGIN, topPos + 28)
-                .selected(menu.isLogSubscribed(viewerId))
-                .onValueChange((checkbox, selected) -> setLogSubscription(selected))
-                .maxWidth(120).build());
+                Component.literal("M"), ignored -> onMcpButton())
+                .tooltip(Tooltip.create(Component.translatable("gui.appliedfactory.bind_mcp")))
+                .bounds(leftPos + imageWidth - 46, topPos + 5, 19, 18).build());
+        pullButton = addRenderableWidget(Button.builder(
+                Component.literal("↓"),
+                ignored -> pullRemoteProgram())
+                .tooltip(Tooltip.create(Component.translatable("gui.appliedfactory.pull_local")))
+                .bounds(leftPos + imageWidth - 67, topPos + 5, 19, 18).build());
+        logButton = addRenderableWidget(Button.builder(
+                Component.literal(logSubscribed ? "●" : "○"), ignored -> toggleLogSubscription())
+                .bounds(leftPos + imageWidth - 88, topPos + 5, 19, 18).build());
+        updateLogButton();
 
         reloadWorkspaceFiles();
         if (!sourceLoaded) {
@@ -160,7 +160,7 @@ public final class FactoryControllerProgramScreen
             }
             selectedPath = path;
             scriptBox.setValue(source);
-            setLiteralStatus(path, 0xffa9d8e9);
+            setLiteralStatus("", 0xffa9d8e9);
             updateButtonStates();
         } catch (IOException | IllegalArgumentException exception) {
             setLiteralStatus("Unable to read " + path + ": " + exception.getMessage(), 0xffff7d7d);
@@ -208,7 +208,7 @@ public final class FactoryControllerProgramScreen
             selectedPath = path;
             scriptBox.setValue(remoteSource);
             reloadWorkspaceFiles();
-            setLiteralStatus("Pulled to appliedscripts/" + path, 0xff8fe3a1);
+            setStatus("gui.appliedfactory.pull_success", 0xff8fe3a1);
             updateButtonStates();
         } catch (IOException | IllegalArgumentException exception) {
             setLiteralStatus("Pull failed: " + exception.getMessage(), 0xffff7d7d);
@@ -228,9 +228,21 @@ public final class FactoryControllerProgramScreen
         }
     }
 
-    private void setLogSubscription(boolean subscribed) {
+    private void toggleLogSubscription() {
+        logSubscribed = !logSubscribed;
         PacketDistributor.sendToServer(new SetControllerLogSubscriptionPayload(
-                menu.getBlockPos(), subscribed));
+                menu.getBlockPos(), logSubscribed));
+        updateLogButton();
+    }
+
+    private void updateLogButton() {
+        if (logButton == null) {
+            return;
+        }
+        logButton.setMessage(Component.literal(logSubscribed ? "●" : "○"));
+        logButton.setTooltip(Tooltip.create(Component.translatable(logSubscribed
+                ? "gui.appliedfactory.unsubscribe_logs"
+                : "gui.appliedfactory.subscribe_logs")));
     }
 
     public void showSaveResult(ControllerProgramSaveResultPayload payload) {
@@ -308,6 +320,18 @@ public final class FactoryControllerProgramScreen
     @Override
     public boolean mouseScrolled(
             double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (mouseX >= leftPos + MARGIN && mouseX < leftPos + FILES_WIDTH
+                && mouseY >= topPos + HEADER_HEIGHT
+                && mouseY < topPos + imageHeight) {
+            var nextPage = filePage + (verticalAmount > 0 ? -1 : verticalAmount < 0 ? 1 : 0);
+            var lastPage = Math.max(0, (workspaceFiles.size() - 1) / rowsPerPage());
+            nextPage = Math.max(0, Math.min(lastPage, nextPage));
+            if (nextPage != filePage) {
+                filePage = nextPage;
+                rebuildFileButtons();
+            }
+            return true;
+        }
         if (scriptBox.isMouseOver(mouseX, mouseY)
                 && scriptBox.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)) {
             return true;
@@ -318,8 +342,8 @@ public final class FactoryControllerProgramScreen
     @Override
     protected void containerTick() {
         super.containerTick();
-        mcpButton.setMessage(Component.translatable(
-                boundHere() ? "gui.appliedfactory.unbind_mcp" : "gui.appliedfactory.bind_mcp"));
+        mcpButton.setTooltip(Tooltip.create(Component.translatable(
+                boundHere() ? "gui.appliedfactory.unbind_mcp" : "gui.appliedfactory.bind_mcp")));
     }
 
     @Override
@@ -364,15 +388,19 @@ public final class FactoryControllerProgramScreen
 
     @Override
     protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
-        graphics.drawString(font, title, 10, 10, 0xffd7f4ff);
-        var path = selectedPath == null
-                ? Component.translatable("gui.appliedfactory.no_local_file").getString()
-                : selectedPath;
-        graphics.drawString(font, font.plainSubstrByWidth(path, 180), FILES_WIDTH + MARGIN * 2, 31,
-                selectedPath == null ? 0xffffd37a : 0xff8fe3a1);
-        var statusX = MARGIN + logSubscription.getWidth() + 8;
-        var statusWidth = FILES_WIDTH - statusX;
-        graphics.drawString(font, font.plainSubstrByWidth(saveStatus.getString(), statusWidth),
-                statusX, 32, saveStatusColor);
+        var fileName = currentFileName();
+        var status = saveStatus.getString();
+        var caption = status.isEmpty() ? fileName : fileName + ":" + status;
+        graphics.drawString(font, font.plainSubstrByWidth(caption, imageWidth - 108),
+                10, 10, saveStatusColor);
+    }
+
+    private String currentFileName() {
+        var path = selectedPath;
+        if (path == null || path.isBlank()) {
+            return Component.translatable("gui.appliedfactory.no_local_file").getString();
+        }
+        var slash = path.lastIndexOf('/');
+        return slash < 0 ? path : path.substring(slash + 1);
     }
 }

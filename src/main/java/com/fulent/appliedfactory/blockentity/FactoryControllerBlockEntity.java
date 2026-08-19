@@ -106,6 +106,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      */
     private FactoryProgram program;
     private boolean programInitialized;
+    private boolean programStoreResolved;
 
     public FactoryControllerBlockEntity(BlockPos pos, BlockState state) {
         super(AppliedFactory.FACTORY_CONTROLLER_BLOCK_ENTITY.get(), pos, state);
@@ -133,6 +134,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         if (level != null) {
             networkNodes.values().forEach(node -> node.create(level, worldPosition));
             if (!level.isClientSide && !programInitialized) {
+                reloadControllerProgramFromStore();
                 programInitialized = true;
                 program = createProgram(compiledControllerProgram);
                 invalidatePatterns();
@@ -177,7 +179,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 logSubscribers.add(subscriber.getUUID(ERROR_SUBSCRIBER_ID_NBT_KEY));
             }
         }
-        if (level == null || !level.isClientSide) {
+        if (level instanceof ServerLevel) {
             program = createProgram(compiledControllerProgram);
             programInitialized = true;
         } else {
@@ -275,6 +277,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      */
     public ProgramLoadResult<FactoryProgram> updateControllerProgram(
             String source, String compiledSource, String workspacePath) {
+        reloadControllerProgramFromStore();
         if (!ControllerProgram.isWithinLimit(source)
                 || !ControllerProgram.isWithinLimit(compiledSource)) {
             return ProgramLoadResult.failure(
@@ -319,18 +322,20 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         var legacySource = tag.contains(ControllerProgram.NBT_KEY, Tag.TAG_STRING)
                 ? tag.getString(ControllerProgram.NBT_KEY)
                 : ControllerProgram.DEFAULT_SOURCE;
+        if (controllerProgramId == null) {
+            controllerProgramId = UUID.randomUUID();
+        }
         if (!(level instanceof ServerLevel serverLevel)) {
-            return new ControllerProgramSources(
-                    ControllerProgram.DEFAULT_SOURCE, ControllerProgram.DEFAULT_SOURCE, "");
+            programStoreResolved = false;
+            var source = ControllerProgram.isWithinLimit(legacySource)
+                    ? legacySource : ControllerProgram.DEFAULT_SOURCE;
+            return new ControllerProgramSources(source, source, "");
         }
         var store = ControllerProgramStore.get(serverLevel);
-        if (controllerProgramId != null) {
-            var storedSource = store.get(controllerProgramId);
-            if (storedSource.isPresent()) {
-                return storedSource.get();
-            }
-        } else {
-            controllerProgramId = UUID.randomUUID();
+        var storedSource = store.get(controllerProgramId);
+        if (storedSource.isPresent()) {
+            programStoreResolved = true;
+            return storedSource.get();
         }
         // Either this is a legacy controller or its SavedData entry was lost. Preserve the
         // legacy value when possible, then self-heal the world-level record.
@@ -338,13 +343,42 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 ? legacySource : ControllerProgram.DEFAULT_SOURCE;
         var programSources = new ControllerProgramSources(source, source, "");
         store.put(controllerProgramId, programSources);
+        programStoreResolved = true;
         return programSources;
+    }
+
+    /**
+     * Block entities can deserialize before their level is attached. Resolve the UUID-backed
+     * world record only after the server level exists, otherwise the temporary default source
+     * would replace the persisted program when the chunk is saved again.
+     */
+    private void reloadControllerProgramFromStore() {
+        if (programStoreResolved || !(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+        if (controllerProgramId == null) {
+            controllerProgramId = UUID.randomUUID();
+        }
+        var store = ControllerProgramStore.get(serverLevel);
+        var stored = store.get(controllerProgramId);
+        if (stored.isPresent()) {
+            var sources = stored.get();
+            controllerProgram = sources.source();
+            compiledControllerProgram = sources.compiledSource();
+            controllerProgramPath = sources.workspacePath();
+            programStoreResolved = true;
+            return;
+        }
+        store.put(controllerProgramId, new ControllerProgramSources(
+                controllerProgram, compiledControllerProgram, controllerProgramPath));
+        programStoreResolved = true;
     }
 
     private void ensureControllerProgramStored() {
         if (!(level instanceof ServerLevel serverLevel)) {
             return;
         }
+        reloadControllerProgramFromStore();
         if (controllerProgramId == null) {
             controllerProgramId = UUID.randomUUID();
         }
