@@ -27,12 +27,6 @@ registerProcessingPattern(
 );
 ```
 
-- generator 产出 `Action` 时，任务等待该 Action；
-- Action 成功后，其结果通过下一次 `next(result)` 返回给脚本；
-- generator 自然结束（`done === true`）时任务完成；
-- generator 抛出异常时任务失败。
-
-
 ## 2. 全局 API
 
 全局函数签名与类型见 [applied_factory.d.ts]，不在此重复。
@@ -40,7 +34,7 @@ registerProcessingPattern(
 
 ## 3. 句柄
 
-`Network`、`Bus`、存储端点和资源来源都只持有稳定地址，不持有 `BlockEntity`、AE grid、capability 或 `MEStorage` 实例。每次查询和 Action 执行时重新解析地址。
+`Network`、`Bus`、存储端点和资源来源都只持有稳定地址。每次查询和 Action 执行时重新解析地址。
 
 Bus 句柄只绑定总线地址，不保存目标机器身份：
 
@@ -66,9 +60,9 @@ const products = furnace.extract();
 yield products.to(network("north"));
 ```
 
-仍可使用索引、`find()`、`filter()` 和 `for...of`。`order.input` 同样是 `ResourceArray`，所以可以直接写 `yield order.input.pushExactlyInto(bus)`。
+`ResourceArray` 继承 ReadonlyArray<Resource>, 可使用只读数组方法，如索引、`find()`、`filter()` 和 `for...of`。`order.input` 同样是 `ResourceArray`，所以可以直接写 `yield order.input.pushExactlyInto(bus)`。它保留注册样板时的输入槽位顺序：重复的同类输入不会在数组中合并，可以分别通过 `order.input[0]`、`order.input[1]` 路由到不同目标；整体批量转移时仍按总量执行。
 
-`extract(channel?, key?, amount?)` 是唯一的查询入口，三个参数都可选，恒返回 `ResourceArray`；没有满足条件的资源时返回空数组，**绝不返回 null**：
+对 network 或 bus 可调用 `extract(channel?, key?, amount?)` ，三个参数都可选，恒返回 `ResourceArray`；没有满足条件的资源时返回空数组。
 
 ```js
 const iron = network("north").extract("ae2:i");                                // 该 channel 全部资源
@@ -78,47 +72,38 @@ const eight = network("north").extract("ae2:i", { id: "minecraft:iron_ingot" }, 
 
 - 只传 `channel`：返回该 channel 下所有资源，每个为完整可用量；
 - 传 `channel` + `key`：返回该 key 的资源，数量为当前可用量（尽可能多）；当前无货时返回空数组；
-- 再传 `amount`：数量为 `min(可用量, amount)` 的上限封顶；`amount` 省略或为 `-1` 都表示尽可能多，必须是正整数或 `-1`，否则抛运行时错误；
+- 再传 `amount`：数量为 `min(可用量, amount)` 的上限封顶；`amount` 省略或为 `-1` 都表示尽可能多地取。
 - `channel` 未注册或 `key` 无法被该 channel 的 codec 解码时抛运行时错误；
 - 结果恒为数组：单个命中也是 1 元素数组；空数组的 `.to(target)` 是安全 no-op（立即完成，不移动任何资源）。
 
-`storage(channel?)` 是只读库存查询：返回目标方块**全部**非空槽位，不受总线所贴面的限制——它以"无面"方式查询 capability（NeoForge 的 block capability 允许 null side），熔炉一次就能看到输入、燃料、输出全部三个槽，包括从任何面都取不出的输入。恒返回 `ResourceArray`，无内容时为空数组；`channel` 可选，只取某个 channel：
+对 network 或 bus 可调用 `storage(channel?)` 是只读库存查询：返回目标方块**全部**非空槽位，不受总线所贴面的限制——它以"无面"方式查询，熔炉一次就能看到输入、燃料、输出全部三个槽，包括从任何面都取不出的输入。恒返回 `ResourceArray`，无内容时为空数组；`channel` 可选，只取某个 channel：
 
 ```js
 const contents = furnace.storage();      // 全部库存（输入/燃料/输出）
 const inputs = furnace.storage("ae2:i"); // 只看物品 channel
 ```
 
-`extract` 只报告该面当前能取出的资源；`storage` 报告方块整体库存，用于探线时排查机器卡料或观察输入。`storage` 的结果是普通 Resource 句柄，可以继续 `.to()` / `pushExactlyInto()`，但不可取出的条目在执行时与"不存在"共享语义——转移等待，不移动任何资源，也不会报错。对网络端点而言内容全部可取出，`Network.storage()` 等价于 `extract()`。
+`extract` 只报告该面当前能取出的资源；`storage` 报告方块整体库存，用于探线时排查机器卡料或观察输入。`storage` 的结果是普通 Resource 句柄，可以继续 `.to()`，将转移可用库存，但不建议调用 `pushExactlyInto()` , 可能因为部分资源无法取出导致永远失败。
 
 句柄创建后资源仍在来源中。如果执行前被其他设备消耗，可等待 Action 会等待同一 AEKey 重新满足数量。AEKey 对应的资源是同质的，句柄不追踪某一个槽位或实体。
 
 同一个 Resource 可以创建多个 Action，但它不代表对普通端点的独占所有权。多个 Action 竞争相同来源时由服务器主线程执行顺序决定，后执行者在库存不足时等待。
 
-## 5. Action 和等待条件
+## 5. Action
 
-Action 持有执行状态，Resource 不持有进度。
+Action 是由 generator 产出的动作，将由动作控制器控制执行。
 
-```text
-TransferAction
-├── source
-├── target
-├── remaining
-└── mode：PARTIAL | EXACT
-```
+`yield action` 会在当前 tick 立刻尝试该动作，若成功直接调用 next(), 因此连续成功yield会连续执行。若失败则会开始每刻尝试一次直到成功，成功后会在当刻调用 next() 通知脚本。
 
-同一个 Action 在 `.now()` 或调度重试后会更新自己的 `remaining`；再次执行这个 Action 只处理剩余数量。
+`action.now()` 立刻尝试动作并返回结果，结果类型由 action 类型而定。
 
-每次尝试都重新解析 source 和 target，并查询：
+以下是获取 `Action` 的方式
 
-```text
-来源当前库存
-&& 目标当前容量
-```
+### 5.1 `resource.to(target)`
 
-### 5.1 `to(target)`
+产生可分转移动作。
 
-`to` 每次转移当前能够转移的部分，当 `yield some_resource.to(somewhere)` 时：
+`to` 每次转移当前能够转移的部分，当 `yield some_resource.to(somewhere)` 时会立刻首次尝试：
 
 - 来源无资源时等待；
 - 目标无容量时等待；
@@ -130,48 +115,27 @@ some_resource.to(somewhere).now();
 ```
 立刻尝试一次转移，返回未成功转移资源的句柄（资源仍留在来源）。
 
-### 5.2 `pushExactlyInto(target)`
+**`ResourceArray.to(target)`** —— 等价于对数组里的每个资源分别执行一次 `to`：逐个资源独立转移当前可行的部分（每次取 `min(来源可用, 目标容量)`），某个资源暂时缺货或目标放不下**不影响其他资源**移动；一次执行后 `remaining` 保留未移动的部分，再次执行（`.now()` 或调度重试）只处理剩余。数组为空时立即完成（安全 no-op）。
+
+### 5.2 `resource.pushExactlyInto(target)`
+
+产生不可分原子转移动作。
 
 ```js
 yield some_resource.pushExactlyInto(somewhere);
 ```
-只有在来源拥有完整资源，并且目标能够一次接收完整资源时才执行。任一条件不满足都不移动资源并继续等待。
+立刻尝试一次；只有在来源拥有完整资源，并且目标能够一次接收完整资源时才执行。任一条件不满足都不移动资源并继续等待。
 
 ```js
 some_resource.pushExactlyInto(somewhere).now();
 ```
 立刻尝试完整插入，返回是否插入成功。
 
-### 5.3 `action.now()`
-
-如果需要非阻塞操作，对 `Action` 显式使用 `.now()`，将立刻获得结果：
-
-```js
-const remaining = resource.to(target).now();
-const success = resource.pushExactlyInto(target).now();
-```
-
-- `to(...).now()` 只尝试一次，返回尚未转移的 Resource；全部移走时返回 `null`；
-- `ResourceArray.to(...).now()` 返回仍未转移的 `ResourceArray`，全部移走时返回 `null`；
-- `pushExactlyInto(...).now()` 只尝试一次，返回 boolean；
-- `.now()` 不进入调度器，不跨 tick 等待。
-
-### 5.4 资源数组（ResourceArray）的批量转移
-
-`ResourceArray`（`extract()`、`storage()`、`order.input` 的返回值）整体是一个可批量转移的批次，`to` / `pushExactlyInto` 作用于整个数组：
-
-**`array.to(target)`** —— 等价于对数组里的每个资源分别执行一次 `to`：逐个资源独立转移当前可行的部分（每次取 `min(来源可用, 目标容量)`），某个资源暂时缺货或目标放不下**不影响其他资源**移动；一次执行后 `remaining` 保留未移动的部分，再次执行（`.now()` 或调度重试）只处理剩余。数组为空时立即完成（安全 no-op）。
-
 **`array.pushExactlyInto(target)`** —— 整个数组作为一个不可分割的批次：要求**所有资源同时**满足"来源拥有完整数量、且目标能一次接收完整数量"，任一资源不满足则整批不动并继续等待；条件满足后一次性把整个批次完整转移，不产生部分进度。数组为空时立即成功。
 
-```js
-const products = furnace.extract();
-yield products.to(network("north"));        // 每个资源能移多少移多少，互不影响
-yield order.input.pushExactlyInto(bus);     // 全部输入凑齐且机器一次能吃下才移动
-```
+### 5.3 `sleep(ticks)`
 
-- `array.to(target).now()` 只尝试一次，返回仍未转移的 `ResourceArray`；全部移走时返回 `null`；
-- `array.pushExactlyInto(target).now()` 只尝试一次，返回整批是否成功（boolean）。
+该动作将在等待传入的tick数后被判定为成功并继续。
 
 ## 6. Codec key、NBT 与物品定位
 
@@ -210,7 +174,7 @@ NBT 只读值会转换为 JavaScript 对象、数组、字符串和数字。超�
 
 ## 7. 世界交互与改名
 
-`use`、`place`、`drop`、`break` 和 `redstone` 是总线与世界的一次性同步交互（不需要 workflow，也不应 `yield`），`rename` 同样是一次性同步操作。目标不可用或来源不足时，`use`/`place` 返回 `false`，`break` 返回 `null`。所有物品专属函数在运行时验证参数的实际 key 是 `AEItemKey`。
+`use`、`place`、`drop`、`break` 和 `redstone` 是总线与世界的一次性同步交互，`rename` 同样是一次性同步操作。目标不可用或来源不足时，`use`/`place` 返回 `false`，`break` 返回 `null`。所有物品专属函数在运行时验证参数的实际 key 是 `AEItemKey`。
 
 **改名：**
 
@@ -277,13 +241,13 @@ go(function* () {
 
 ## 8. 脚本内配方获取：require_recipes 预编译宏
 
-`require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数。MCP 的 `appliedfactory_execute`/`appliedfactory_upload` 在发送前，以及控制器 GUI 每次保存前，客户端都会读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量。控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`。
+`require_recipes(filter)` 是**客户端预编译宏**，不是运行时函数。将脚本上传前，客户端会读取工作区里的 `processing_recipes.json`（用 `machine` 过滤器时还会读 `recipe_types.json`），按过滤器选出配方后，把整个调用替换成配方数组字面量。控制器收到的已经是“烤好”的配方数据，运行时不存在 `require_recipes`。
 
 GUI 输入的源码视为位于 `appliedscripts/` 根目录的虚拟脚本文件，因此 `require_recipes()` 的数据文件和其 `include()` 都从该目录计算相对路径。保存的是展开后的源码；原始宏调用不会随控制器程序另行保存。
 
-每个配方条目为 `{id, type, inputs, outputs, json}`：`inputs`/`outputs` 是 `{channel, key, amount}` 资源声明（与 `stack()` 同形），可以直接引用到 `registerProcessingPattern`；`json` 保留原始配方 JSON 作为只读参考。数据文件由 `/appliedfactory export`（或 `setupworkspace`）在本地存档中生成；服务端通用规范化只覆盖**物品**（输出取主产物精确数量），流体、化学品、能量、输入数量 >1 的配方以 `json` 为准。
+每个配方条目为 `{id, type, inputs, outputs, json}`：`inputs`/`outputs` 是 `{channel, key, amount}` 资源声明（与 `stack()` 同形），可以直接引用到 `registerProcessingPattern`；`json` 保留原始配方 JSON 作为只读参考。
 
-**输入槽不拍平**：一个输入槽对应配方的一个 ingredient 槽位。tag 或多选材料槽（如 `#minecraft:logs_that_burn`）会保留 `options` 数组（完整 `{channel, key, amount}` 条目，列出该槽接受的全部可选项），`key` 是代表物（第一个可选项，可直接用于注册）；配方只需要其中**任意一个**，不是全部。只有一个可选项时省略 `options`。
+一个输入槽对应配方的一个 ingredient 槽位。tag 或多选材料槽（如 `#minecraft:logs_that_burn`）会保留 `options` 数组（完整 `{channel, key, amount}` 条目，列出该槽接受的全部可选项），`key` 是代表物（第一个可选项，可直接用于注册）；配方只需要其中**任意一个**。只有一个可选项时省略 `options`。
 
 **过滤器**是对象字面量，字段值可为单个字符串或字符串数组（any-of）：
 

@@ -206,7 +206,7 @@ final class ScriptApi {
     JsOrder order(ScriptExecutionContext context) {
         var origin = FactoryResourceOrigin.escrow(context.workflowId());
         return new JsOrder(
-                resourceArray(origin, context.inputs()),
+                orderedResourceArray(origin, context.inputs()),
                 new JsNetwork(this, context.orderNetwork()));
     }
 
@@ -264,8 +264,26 @@ final class ScriptApi {
 
     Object resourceArray(
             FactoryResourceOrigin origin, List<FactoryResource> resources) {
+        return resourceArray(origin, resources, false);
+    }
+
+    /**
+     * Creates the order-input view. Repeated AE keys remain distinct visible
+     * entries so a processing script can route each encoded input slot, while
+     * the array's bulk actions still operate on the normalized total bundle.
+     */
+    private Object orderedResourceArray(
+            FactoryResourceOrigin origin, List<FactoryResource> resources) {
+        return resourceArray(origin, resources, true);
+    }
+
+    private Object resourceArray(
+            FactoryResourceOrigin origin, List<FactoryResource> resources, boolean preserveEntries) {
         var normalized = FactoryResourceRef.normalize(resources);
-        var values = normalized.stream()
+        var visibleResources = preserveEntries
+                ? resources.stream().filter(resource -> resource.amount() > 0).toList()
+                : normalized;
+        var values = visibleResources.stream()
                 .map(resource -> binder.wrap(resourceFacade(new FactoryResourceRef(
                         origin, List.of(resource)))))
                 .toArray();

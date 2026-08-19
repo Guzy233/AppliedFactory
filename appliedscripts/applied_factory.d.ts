@@ -179,7 +179,7 @@ declare function sleep(ticks: number): SleepAction;
 declare function go(factory: () => Generator<Action, unknown, unknown>): void;
 
 interface Order {
-  /** 表示该订单的输入资源 */
+  /** 表示该订单的输入资源，保留样板输入槽位顺序；同类重复输入不会合并，可按索引分别路由。 */
   readonly input: ResourceArray;
   /** 下单网络 */
   readonly network: Network;

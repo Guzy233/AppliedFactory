@@ -691,13 +691,16 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     private static List<FactoryResource> collectInputs(
             IPatternDetails details, KeyCounter[] inputHolder) {
-        var amounts = new LinkedHashMap<AEKey, Long>();
+        // AE2's stock processing pattern condenses equal keys for crafting, then
+        // replays its encoded sparse input order through this callback. Keep that
+        // sequence so scripts can route repeated ingredients to different targets.
+        var inputs = new ArrayList<FactoryResource>();
         details.pushInputsToExternalInventory(inputHolder, (key, amount) -> {
             if (amount > 0) {
-                amounts.merge(key, amount, Math::addExact);
+                inputs.add(new FactoryResource(key, amount));
             }
         });
-        return fromAmounts(amounts);
+        return List.copyOf(inputs);
     }
 
     private static List<FactoryResource> collectOutputs(IPatternDetails details) {

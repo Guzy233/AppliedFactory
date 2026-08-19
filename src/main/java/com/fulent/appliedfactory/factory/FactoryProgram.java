@@ -27,6 +27,7 @@ import net.minecraft.core.HolderLookup;
 /** Owns one compiled Rhino scope and its non-persistent generator jobs. */
 public final class FactoryProgram {
     public static final int MAX_JOBS = 64;
+    private static final int MAX_IMMEDIATE_TRANSITIONS_PER_TICK = 128;
 
     public interface Host {
         long tick();
@@ -295,46 +296,63 @@ public final class FactoryProgram {
     }
 
     private void advance(FactoryJob job) {
-        var pending = job.pendingAction();
-        if (pending == null) {
-            resumeGenerator(job, null);
-            return;
-        }
-        if (pending instanceof FactorySleepAction sleep) {
-            if (host.tick() - job.actionStartedTick() >= sleep.ticks()) {
-                job.clearWaiting();
-                resumeGenerator(job, null);
-            }
-            return;
-        }
-        if (pending instanceof FactoryTransferAction transfer) {
-            try {
-                var result = host.performTransfer(job.id(), transfer);
-                if (result.completed()) {
-                    job.clearWaiting();
-                    resumeGenerator(job, true);
-                } else {
-                    job.setWaiting(transfer, job.actionStartedTick());
+        // Advance an immediately satisfiable chain in one scheduler tick. A cap
+        // prevents a generator that yields endlessly successful Actions from
+        // monopolizing the server thread; its current Action remains pending for
+        // the next tick when the cap is reached.
+        for (int transitions = 0; transitions < MAX_IMMEDIATE_TRANSITIONS_PER_TICK; transitions++) {
+            var pending = job.pendingAction();
+            if (pending == null) {
+                if (!resumeGenerator(job, null)) {
+                    return;
                 }
-            } catch (RuntimeException exception) {
-                finish(job, messageOf(exception));
+                continue;
+            }
+            if (pending instanceof FactorySleepAction sleep) {
+                if (host.tick() - job.actionStartedTick() < sleep.ticks()) {
+                    return;
+                }
+                job.clearWaiting();
+                if (!resumeGenerator(job, null)) {
+                    return;
+                }
+                continue;
+            }
+            if (pending instanceof FactoryTransferAction transfer) {
+                try {
+                    var result = host.performTransfer(job.id(), transfer);
+                    if (!result.completed()) {
+                        job.setWaiting(transfer, job.actionStartedTick());
+                        return;
+                    }
+                    job.clearWaiting();
+                    if (!resumeGenerator(job, true)) {
+                        return;
+                    }
+                } catch (RuntimeException exception) {
+                    finish(job, messageOf(exception));
+                    return;
+                }
+                continue;
             }
             return;
         }
     }
 
-    private void resumeGenerator(FactoryJob job, Object result) {
+    /** @return whether the generator yielded an Action that should be advanced now. */
+    private boolean resumeGenerator(FactoryJob job, Object result) {
         var step = runtime.advance(
                 job.workflow(), job.context(), result, job.firstStep());
         if (step instanceof ScriptStep.Waiting waiting) {
             job.setWaiting(waiting.action(), host.tick());
-            return;
+            return true;
         }
         if (step instanceof ScriptStep.Failed failed) {
             finish(job, failed.message());
-            return;
+            return false;
         }
         finish(job, null);
+        return false;
     }
 
     private void finish(FactoryJob job, String failure) {
