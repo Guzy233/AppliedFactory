@@ -50,6 +50,7 @@ import appeng.api.networking.energy.IEnergyService;
 import appeng.api.networking.security.IActionHost;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEKeyType;
 import appeng.api.stacks.KeyCounter;
 import appeng.api.util.AECableType;
 import net.minecraft.core.BlockPos;
@@ -108,6 +109,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private FactoryProgram program;
     private boolean programInitialized;
     private boolean programStoreResolved;
+    private BusTopology busTopology = BusTopology.EMPTY;
+    private boolean busTopologyDirty = true;
 
     public FactoryControllerBlockEntity(BlockPos pos, BlockState state) {
         super(AppliedFactory.FACTORY_CONTROLLER_BLOCK_ENTITY.get(), pos, state);
@@ -157,6 +160,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     private void destroyGridNodes() {
         networkNodes.values().forEach(IManagedGridNode::destroy);
+        invalidateBusTopology();
         if (program != null) {
             program.discard();
             program = null;
@@ -193,6 +197,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             programInitialized = false;
         }
         networkNodes.values().forEach(node -> node.loadFromNBT(tag));
+        invalidateBusTopology();
         invalidatePatterns();
     }
 
@@ -234,6 +239,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     @Override
     public void onStateChanged(
             FactoryControllerBlockEntity owner, IGridNode node, State state) {
+        onBusTopologyChanged();
         invalidatePatterns();
     }
 
@@ -525,8 +531,20 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     @Override
+    public List<FactoryResource> availableResources(
+            FactoryEndpoint endpoint, AEKeyType channel) {
+        return actionExecutor.available(endpoint, channel);
+    }
+
+    @Override
     public List<FactoryResource> storageContents(FactoryEndpoint endpoint) {
         return actionExecutor.storage(endpoint);
+    }
+
+    @Override
+    public List<FactoryResource> storageContents(
+            FactoryEndpoint endpoint, AEKeyType channel) {
+        return actionExecutor.storage(endpoint, channel);
     }
 
     @Override
@@ -639,11 +657,12 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     /**
-     * Called by the AE2 grid mixins and the bus part when a factory bus joined/left a network or
-     * its target machine changed. Event-driven replacement for the old per-tick topology
-     * fingerprint: notifies network.onChange listeners on the next step.
+     * Called by the controller nodes, bus nodes and AE2 grid hooks when a controller side changes
+     * grids or the active bus set changes. Invalidates the lookup snapshot and notifies
+     * network.onChange listeners on the next step.
      */
     public void onBusTopologyChanged() {
+        invalidateBusTopology();
         if (program != null) {
             program.markEnvironmentChanged();
         }
@@ -698,44 +717,62 @@ public final class FactoryControllerBlockEntity extends BlockEntity
 
     @Override
     public Map<Direction, List<FactoryBusAddress>> busAddressesByNetwork() {
-        var result = new EnumMap<Direction, List<FactoryBusAddress>>(Direction.class);
-        currentBusesByNetwork().forEach((side, buses) -> result.put(side, buses.stream()
-                .flatMap(bus -> bus.address().stream())
-                .toList()));
-        return result;
+        return busTopology().addressesByNetwork();
     }
 
-    private Map<Direction, List<FactoryBusPart>> currentBusesByNetwork() {
-        var result = new EnumMap<Direction, List<FactoryBusPart>>(Direction.class);
+    private BusTopology busTopology() {
+        if (!busTopologyDirty) {
+            return busTopology;
+        }
+
+        var addressesByNetwork =
+                new EnumMap<Direction, List<FactoryBusAddress>>(Direction.class);
+        var busesByAddress = new LinkedHashMap<FactoryBusAddress, FactoryBusPart>();
+        var recoverySides = new LinkedHashMap<FactoryBusAddress, Direction>();
+        var activeBusesByGrid = new IdentityHashMap<IGrid, List<FactoryBusPart>>();
         for (var side : Direction.values()) {
             var node = networkNodes.get(side);
             var grid = node == null ? null : node.getGrid();
             if (grid == null || !node.isOnline()) {
-                result.put(side, List.of());
+                addressesByNetwork.put(side, List.of());
                 continue;
             }
-            var collected = grid.getActiveMachines(FactoryBusPart.class).stream()
-                    .sorted(Comparator
-                            .comparingLong((FactoryBusPart bus) -> bus.getHostPosition().asLong())
-                            .thenComparing(bus -> bus.getSide() == null
-                                    ? "" : bus.getSide().getName()))
-                    .toList();
-            result.put(side, collected);
+
+            var buses = activeBusesByGrid.computeIfAbsent(grid, ignored ->
+                    grid.getActiveMachines(FactoryBusPart.class).stream()
+                            .sorted(Comparator
+                                    .comparingLong((FactoryBusPart bus) ->
+                                            bus.getHostPosition().asLong())
+                                    .thenComparing(bus -> bus.getSide() == null
+                                            ? "" : bus.getSide().getName()))
+                            .toList());
+            var addresses = new ArrayList<FactoryBusAddress>(buses.size());
+            for (var bus : buses) {
+                bus.address().ifPresent(address -> {
+                    addresses.add(address);
+                    busesByAddress.putIfAbsent(address, bus);
+                    recoverySides.putIfAbsent(address, side);
+                });
+            }
+            addressesByNetwork.put(side, List.copyOf(addresses));
         }
-        return result;
+
+        busTopology = new BusTopology(
+                Map.copyOf(addressesByNetwork),
+                Map.copyOf(busesByAddress),
+                Map.copyOf(recoverySides));
+        busTopologyDirty = false;
+        return busTopology;
     }
 
-    private List<FactoryBusPart> getFactoryBuses() {
-        var unique = new LinkedHashSet<FactoryBusPart>();
-        currentBusesByNetwork().values().forEach(unique::addAll);
-        return List.copyOf(unique);
+    private void invalidateBusTopology() {
+        busTopology = BusTopology.EMPTY;
+        busTopologyDirty = true;
     }
 
     private Optional<FactoryBusPart> resolveBus(
             com.fulent.appliedfactory.factory.FactoryBusAddress address) {
-        return getFactoryBuses().stream()
-                .filter(bus -> bus.address().filter(address::equals).isPresent())
-                .findFirst();
+        return Optional.ofNullable(busTopology().busesByAddress().get(address));
     }
 
     private Optional<com.fulent.appliedfactory.factory.FactoryBusTarget> resolveBusTarget(
@@ -744,13 +781,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     private Direction recoverySideForBus(FactoryBusAddress address) {
-        var addresses = busAddressesByNetwork();
-        for (var side : Direction.values()) {
-            if (addresses.getOrDefault(side, List.of()).contains(address)) {
-                return side;
-            }
-        }
-        return Direction.NORTH;
+        return busTopology().recoverySides().getOrDefault(address, Direction.NORTH);
     }
 
     private Optional<FactoryActionExecutor.NetworkEndpoint> getNetworkStorage(Direction side) {
@@ -930,6 +961,14 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     }
 
     private record EnergyNetwork(IEnergyService service, double stored, double demand) {
+    }
+
+    private record BusTopology(
+            Map<Direction, List<FactoryBusAddress>> addressesByNetwork,
+            Map<FactoryBusAddress, FactoryBusPart> busesByAddress,
+            Map<FactoryBusAddress, Direction> recoverySides) {
+        private static final BusTopology EMPTY =
+                new BusTopology(Map.of(), Map.of(), Map.of());
     }
 
     private final class NetworkAttachment implements ICraftingProvider, IActionHost {

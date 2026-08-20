@@ -129,12 +129,9 @@ final class ScriptApi {
             return resourceArray(origin, host.availableResources(endpoint));
         }
         var channel = resolveChannel(JsValues.string(rawChannel));
-        var snapshot = host.availableResources(endpoint);
+        var snapshot = host.availableResources(endpoint, channel);
         if (JsValues.isNullish(rawKey)) {
-            return resourceArray(origin, snapshot.stream()
-                    .filter(resource -> ScriptApi.channel(resource.key())
-                            .equals(channel.getId().toString()))
-                    .toList());
+            return resourceArray(origin, snapshot);
         }
         var keyObject = JsValues.object(rawKey, "extract key");
         var key = channel.loadKeyFromTag(
@@ -178,15 +175,11 @@ final class ScriptApi {
      */
     Object storage(FactoryEndpoint endpoint, Object rawChannel) {
         var origin = FactoryResourceOrigin.endpoint(endpoint);
-        var contents = host.storageContents(endpoint);
         if (JsValues.isNullish(rawChannel)) {
-            return resourceArray(origin, contents);
+            return resourceArray(origin, host.storageContents(endpoint));
         }
         var channel = resolveChannel(JsValues.string(rawChannel));
-        return resourceArray(origin, contents.stream()
-                .filter(resource -> ScriptApi.channel(resource.key())
-                        .equals(channel.getId().toString()))
-                .toList());
+        return resourceArray(origin, host.storageContents(endpoint, channel));
     }
 
     List<String> channels(FactoryBusAddress bus) {

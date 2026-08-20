@@ -21,6 +21,7 @@ import com.fulent.appliedfactory.script.ScriptRuntime;
 import com.fulent.appliedfactory.script.ScriptStep;
 
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEKeyType;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 
@@ -48,12 +49,26 @@ public final class FactoryProgram {
 
         List<FactoryResource> availableResources(FactoryEndpoint endpoint);
 
+        default List<FactoryResource> availableResources(
+                FactoryEndpoint endpoint, AEKeyType channel) {
+            return availableResources(endpoint).stream()
+                    .filter(resource -> resource.key().getType().equals(channel))
+                    .toList();
+        }
+
         /**
          * Full current contents of an external endpoint, including slots that
          * reject extraction from the accessed face (e.g. a machine input).
          * Network endpoints equal {@link #availableResources(FactoryEndpoint)}.
          */
         List<FactoryResource> storageContents(FactoryEndpoint endpoint);
+
+        default List<FactoryResource> storageContents(
+                FactoryEndpoint endpoint, AEKeyType channel) {
+            return storageContents(endpoint).stream()
+                    .filter(resource -> resource.key().getType().equals(channel))
+                    .toList();
+        }
 
         /**
          * The key-type ids ({"@literal "ae2:i"}, {"@literal "ae2:f"}, ...) a bus target

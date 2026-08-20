@@ -1,6 +1,6 @@
 package com.fulent.appliedfactory.factory;
 
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -408,6 +408,18 @@ public final class FactoryBusTarget {
     }
 
     /**
+     * Resolves every storage exposed on the target face in one pass. Unlike calling
+     * {@link #channels()} followed by {@link #storage(AEKeyType)}, each strategy creates at most
+     * one wrapper for this snapshot.
+     */
+    public Map<AEKeyType, MEStorage> storages() {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
+            return Map.of();
+        }
+        return createWrappers(strategies(serverLevel), true);
+    }
+
+    /**
      * Same as {@link #storage(AEKeyType)} but the wrapper is built from
      * strategies queried with a {@code null} side, so it exposes the target
      * block's <em>whole container</em> instead of the single face's slot subset:
@@ -424,37 +436,40 @@ public final class FactoryBusTarget {
         return strategy == null ? null : strategy.createWrapper(false, NO_CHANGE_LISTENER);
     }
 
+    /** Resolves every whole-container storage in one wrapper pass. */
+    public Map<AEKeyType, MEStorage> storagesAll() {
+        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
+            return Map.of();
+        }
+        return createWrappers(allStrategies(serverLevel), false);
+    }
+
     /**
      * The key channels the target block exposes when queried without a face,
      * i.e. the channels that can list the block's whole container.
      */
     public Set<AEKeyType> channelsAll() {
-        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
-            return Set.of();
-        }
-        var result = new LinkedHashSet<AEKeyType>();
-        for (var entry : allStrategies(serverLevel).entrySet()) {
-            if (entry.getValue().createWrapper(false, NO_CHANGE_LISTENER) != null) {
-                result.add(entry.getKey());
-            }
-        }
-        return Set.copyOf(result);
+        return storagesAll().keySet();
     }
 
     /**
      * The key channels this target face currently exposes.
      */
     public Set<AEKeyType> channels() {
-        if (!(level instanceof ServerLevel serverLevel) || !isLoaded()) {
-            return Set.of();
-        }
-        var result = new LinkedHashSet<AEKeyType>();
-        for (var entry : strategies(serverLevel).entrySet()) {
-            if (entry.getValue().createWrapper(true, NO_CHANGE_LISTENER) != null) {
-                result.add(entry.getKey());
+        return storages().keySet();
+    }
+
+    private static Map<AEKeyType, MEStorage> createWrappers(
+            Map<AEKeyType, ExternalStorageStrategy> strategies,
+            boolean extractableOnly) {
+        var result = new LinkedHashMap<AEKeyType, MEStorage>();
+        for (var entry : strategies.entrySet()) {
+            var storage = entry.getValue().createWrapper(extractableOnly, NO_CHANGE_LISTENER);
+            if (storage != null) {
+                result.put(entry.getKey(), storage);
             }
         }
-        return Set.copyOf(result);
+        return Map.copyOf(result);
     }
 
     private Map<AEKeyType, ExternalStorageStrategy> strategies(ServerLevel serverLevel) {

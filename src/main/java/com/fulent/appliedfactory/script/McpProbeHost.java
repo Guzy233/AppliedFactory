@@ -19,6 +19,7 @@ import com.fulent.appliedfactory.factory.FactoryTransferAction;
 import com.fulent.appliedfactory.factory.FactoryTransferResult;
 
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEKeyType;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 
@@ -96,8 +97,20 @@ public final class McpProbeHost implements FactoryProgram.Host {
     }
 
     @Override
+    public List<FactoryResource> availableResources(
+            FactoryEndpoint endpoint, AEKeyType channel) {
+        return controller.availableResources(endpoint, channel);
+    }
+
+    @Override
     public List<FactoryResource> storageContents(FactoryEndpoint endpoint) {
         return controller.storageContents(endpoint);
+    }
+
+    @Override
+    public List<FactoryResource> storageContents(
+            FactoryEndpoint endpoint, AEKeyType channel) {
+        return controller.storageContents(endpoint, channel);
     }
 
     @Override

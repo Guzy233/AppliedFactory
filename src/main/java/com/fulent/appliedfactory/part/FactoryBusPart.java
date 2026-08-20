@@ -7,6 +7,7 @@ import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
+import com.fulent.appliedfactory.blockentity.FactoryControllerBlockEntity;
 import com.fulent.appliedfactory.factory.FactoryBusAddress;
 import com.fulent.appliedfactory.factory.FactoryBusTarget;
 import appeng.api.networking.GridFlags;
@@ -55,6 +56,13 @@ public final class FactoryBusPart
     private BlockEntity hostBlockEntity;
     @Nullable
     private Direction side;
+    /**
+     * Long-lived target facade: its AE2 external-storage strategies own NeoForge capability
+     * caches, which observe target-block invalidation themselves. Inventory contents are never
+     * cached here.
+     */
+    @Nullable
+    private FactoryBusTarget cachedTarget;
     private boolean clientPowered;
     private boolean clientActive;
     private int redstoneOutput;
@@ -85,6 +93,7 @@ public final class FactoryBusPart
 
     @Override
     public void setPartHostInfo(@Nullable Direction side, IPartHost host, BlockEntity blockEntity) {
+        cachedTarget = null;
         this.side = side;
         this.host = host;
         this.hostBlockEntity = blockEntity;
@@ -100,6 +109,7 @@ public final class FactoryBusPart
     @Override
     public void removeFromWorld() {
         mainNode.destroy();
+        cachedTarget = null;
     }
 
     @Override
@@ -165,6 +175,12 @@ public final class FactoryBusPart
     public void onStateChanged(FactoryBusPart owner, IGridNode node, State state) {
         if (host != null) {
             host.markForUpdate();
+        }
+        var grid = node.getGrid();
+        if (grid != null) {
+            for (var controller : grid.getMachines(FactoryControllerBlockEntity.class)) {
+                controller.onBusTopologyChanged();
+            }
         }
     }
 
@@ -241,10 +257,13 @@ public final class FactoryBusPart
         if (hostBlockEntity == null || hostBlockEntity.getLevel() == null || side == null) {
             return Optional.empty();
         }
-        return Optional.of(new FactoryBusTarget(
-                hostBlockEntity.getLevel(),
-                hostBlockEntity.getBlockPos().relative(side),
-                side));
+        if (cachedTarget == null) {
+            cachedTarget = new FactoryBusTarget(
+                    hostBlockEntity.getLevel(),
+                    hostBlockEntity.getBlockPos().relative(side),
+                    side);
+        }
+        return Optional.of(cachedTarget);
     }
 
     public Optional<FactoryBusAddress> address() {

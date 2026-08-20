@@ -8,12 +8,15 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 
+import org.jetbrains.annotations.Nullable;
+
 import com.google.gson.JsonParseException;
 
 import appeng.api.config.Actionable;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEItemKey;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.AEKeyType;
 import appeng.api.stacks.KeyCounter;
 import appeng.api.storage.MEStorage;
 import net.minecraft.core.Direction;
@@ -116,21 +119,31 @@ public final class FactoryActionExecutor {
 
     /** Current concrete contents of an external endpoint (extractable only). */
     public List<FactoryResource> available(FactoryEndpoint endpoint) {
+        return available(endpoint, null);
+    }
+
+    /** Current extractable contents, optionally limited to one AE key channel. */
+    public List<FactoryResource> available(
+            FactoryEndpoint endpoint, @Nullable AEKeyType channel) {
         var amounts = new LinkedHashMap<AEKey, Long>();
         if (endpoint.kind() == FactoryEndpoint.Kind.NETWORK) {
             collectNetwork(amounts, endpoint);
         } else {
             var bus = busResolver.resolve(endpoint.bus()).orElse(null);
             if (bus != null) {
-                for (var channel : bus.channels()) {
+                if (channel != null) {
                     var storage = bus.storage(channel);
                     if (storage != null) {
+                        collect(storage, amounts);
+                    }
+                } else {
+                    for (var storage : bus.storages().values()) {
                         collect(storage, amounts);
                     }
                 }
             }
         }
-        return toResources(amounts);
+        return toResources(amounts, channel);
     }
 
     /**
@@ -142,21 +155,31 @@ public final class FactoryActionExecutor {
      * entries that do not exist.
      */
     public List<FactoryResource> storage(FactoryEndpoint endpoint) {
+        return storage(endpoint, null);
+    }
+
+    /** Full endpoint contents, optionally limited to one AE key channel. */
+    public List<FactoryResource> storage(
+            FactoryEndpoint endpoint, @Nullable AEKeyType channel) {
         var amounts = new LinkedHashMap<AEKey, Long>();
         if (endpoint.kind() == FactoryEndpoint.Kind.NETWORK) {
             collectNetwork(amounts, endpoint);
         } else {
             var bus = busResolver.resolve(endpoint.bus()).orElse(null);
             if (bus != null) {
-                for (var channel : bus.channelsAll()) {
+                if (channel != null) {
                     var storage = bus.storageAll(channel);
                     if (storage != null) {
+                        collect(storage, amounts);
+                    }
+                } else {
+                    for (var storage : bus.storagesAll().values()) {
                         collect(storage, amounts);
                     }
                 }
             }
         }
-        return toResources(amounts);
+        return toResources(amounts, channel);
     }
 
     private void collectNetwork(LinkedHashMap<AEKey, Long> amounts, FactoryEndpoint endpoint) {
@@ -166,9 +189,11 @@ public final class FactoryActionExecutor {
         }
     }
 
-    private static List<FactoryResource> toResources(LinkedHashMap<AEKey, Long> amounts) {
+    private static List<FactoryResource> toResources(
+            LinkedHashMap<AEKey, Long> amounts, @Nullable AEKeyType channel) {
         return amounts.entrySet().stream()
                 .filter(entry -> entry.getValue() > 0)
+                .filter(entry -> channel == null || entry.getKey().getType().equals(channel))
                 .map(entry -> new FactoryResource(entry.getKey(), entry.getValue()))
                 .toList();
     }
@@ -313,19 +338,19 @@ public final class FactoryActionExecutor {
     /** Extracts a complete interaction input or returns null without partial progress. */
     private List<FactoryResource> extractExact(
             UUID workflowId, FactoryResourceRef input) {
+        var planned = new ArrayList<SourcePlan>(input.bundle().size());
         for (var resource : input.bundle()) {
             var access = source(input.origin(), resource.key());
             if (access == null
                     || access.extract(resource.key(), resource.amount(), true) != resource.amount()) {
                 return null;
             }
+            planned.add(new SourcePlan(resource, access));
         }
         var extracted = new ArrayList<FactoryResource>();
-        for (var resource : input.bundle()) {
-            var access = source(input.origin(), resource.key());
-            var amount = access == null
-                    ? 0
-                    : access.extract(resource.key(), resource.amount(), false);
+        for (var plan : planned) {
+            var resource = plan.resource();
+            var amount = plan.source().extract(resource.key(), resource.amount(), false);
             if (amount > 0) {
                 extracted.add(new FactoryResource(resource.key(), amount));
             }
@@ -448,6 +473,7 @@ public final class FactoryActionExecutor {
     }
 
     private FactoryTransferResult exact(UUID workflowId, FactoryTransferAction action) {
+        var planned = new ArrayList<TransferPlan>(action.remaining().size());
         for (var resource : action.remaining()) {
             var source = source(action.source(), resource.key());
             var target = target(action.target(), resource.key());
@@ -456,12 +482,13 @@ public final class FactoryActionExecutor {
                     || target.insert(resource.key(), resource.amount(), true) != resource.amount()) {
                 return FactoryTransferResult.waiting(action.remaining());
             }
+            planned.add(new TransferPlan(resource, source, target));
         }
 
         var extracted = new ArrayList<FactoryResource>();
-        for (var resource : action.remaining()) {
-            var source = source(action.source(), resource.key());
-            var amount = source.extract(resource.key(), resource.amount(), false);
+        for (var plan : planned) {
+            var resource = plan.resource();
+            var amount = plan.source().extract(resource.key(), resource.amount(), false);
             if (amount > 0) {
                 extracted.add(new FactoryResource(resource.key(), amount));
             }
@@ -472,9 +499,10 @@ public final class FactoryActionExecutor {
         }
 
         var inserted = new ArrayList<FactoryResource>();
-        for (var resource : extracted) {
-            var target = target(action.target(), resource.key());
-            var amount = target.insert(resource.key(), resource.amount(), false);
+        for (int index = 0; index < extracted.size(); index++) {
+            var resource = extracted.get(index);
+            var amount = planned.get(index).target()
+                    .insert(resource.key(), resource.amount(), false);
             if (amount > 0) {
                 inserted.add(new FactoryResource(resource.key(), amount));
             }
@@ -653,6 +681,13 @@ public final class FactoryActionExecutor {
         long extract(AEKey key, long amount, boolean simulate);
 
         long insert(AEKey key, long amount, boolean simulate);
+    }
+
+    private record SourcePlan(FactoryResource resource, StorageAccess source) {
+    }
+
+    private record TransferPlan(
+            FactoryResource resource, StorageAccess source, StorageAccess target) {
     }
 
     private record MeStorageAccess(MEStorage storage, IActionSource source)
