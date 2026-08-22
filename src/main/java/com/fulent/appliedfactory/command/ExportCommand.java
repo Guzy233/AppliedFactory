@@ -1,13 +1,11 @@
 package com.fulent.appliedfactory.command;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -16,7 +14,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
-import java.util.zip.ZipFile;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -73,9 +70,6 @@ import appeng.api.stacks.AEKeyTypes;
 public final class ExportCommand {
     private static final String WORKSPACE_RESOURCE = "assets/appliedfactory/appliedscripts";
     private static final String GUIDE_RESOURCE = "assets/appliedfactory/ae2guide";
-    private static final Set<String> DYNAMIC_FILES =
-            Set.of("channels.json", "processing_recipes.json", "recipe_types.json");
-
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
             .disableHtmlEscaping()
@@ -352,11 +346,9 @@ public final class ExportCommand {
 
     /**
      * Restores the workspace assets, then applies the player's language overlay.
-     * Sources are probed in
-     * order: classpath directory resources (dev runs read the built resources
-     * directory), then the mod jar's zip entries (production), then a hardcoded
-     * fallback list. Each file is read through the classloader, so jar and
-     * directory classpaths behave identically.
+     * The NeoForge mod filesystem joins class and resource roots in development
+     * and exposes the jar filesystem in production. Walking that filesystem keeps
+     * discovery identical in both environments without a filename manifest.
      *
      * @return the number of doc files written
      */
@@ -372,89 +364,60 @@ public final class ExportCommand {
 
     private static int copyPackagedLayer(
             Path root, String resourceRoot, boolean baseLayer) throws IOException {
-        var names = packagedDocNames(resourceRoot, baseLayer);
-        var copied = 0;
-        var loader = ExportCommand.class.getClassLoader();
-        for (var name : names) {
-            try (var in = loader.getResourceAsStream(resourceRoot + "/" + name)) {
-                if (in == null) {
-                    continue;
-                }
-                var output = root.resolve(name);
-                Files.createDirectories(output.getParent());
-                Files.copy(in, output, StandardCopyOption.REPLACE_EXISTING);
-                copied++;
+        var sourceRoot = modResource(resourceRoot);
+        if (!Files.isDirectory(sourceRoot)) {
+            if (baseLayer) {
+                throw new IOException("Missing bundled workspace directory: " + resourceRoot);
             }
+            return 0;
+        }
+        List<Path> sources;
+        try (var files = Files.walk(sourceRoot)) {
+            sources = files.filter(Files::isRegularFile)
+                    .filter(path -> !baseLayer || !isLanguageOverlay(sourceRoot, path))
+                    .sorted(Comparator.comparing(path -> portable(sourceRoot.relativize(path))))
+                    .toList();
+        }
+        var copied = 0;
+        for (var source : sources) {
+            var relative = sourceRoot.relativize(source);
+            var output = root.resolve(portable(relative));
+            Files.createDirectories(output.getParent());
+            Files.copy(source, output, StandardCopyOption.REPLACE_EXISTING);
+            copied++;
         }
         return copied;
     }
 
-    private static Set<String> packagedDocNames(
-            String resourceRoot, boolean baseLayer) throws IOException {
-        var names = new LinkedHashSet<String>();
-        // 1. Classpath directories used by development runs.
-        var loader = ExportCommand.class.getClassLoader();
-        var resources = loader.getResources(resourceRoot);
-        while (resources.hasMoreElements()) {
-            var url = resources.nextElement();
-            if (!"file".equals(url.getProtocol())) {
-                continue;
-            }
-            Path dir;
-            try {
-                dir = Path.of(url.toURI());
-            } catch (java.net.URISyntaxException exception) {
-                continue;
-            }
-            if (!Files.isDirectory(dir)) {
-                continue;
-            }
-            try (var files = Files.walk(dir)) {
-                files.filter(Files::isRegularFile)
-                        .map(path -> dir.relativize(path).toString().replace('\\', '/'))
-                        .forEach(names::add);
-            }
-        }
-        if (names.isEmpty()) {
-            // 2. Mod jar: production keeps the packaged docs inside the jar.
-            var modFile = ModList.get().getModFileById(AppliedFactory.MOD_ID);
-            var filePath = modFile == null ? null : modFile.getFile().getFilePath();
-            if (filePath != null && Files.isRegularFile(filePath)) {
-                try (var zip = new ZipFile(filePath.toFile())) {
-                    var prefix = resourceRoot + "/";
-                    for (var entry : Collections.list(zip.entries())) {
-                        var name = entry.getName();
-                        if (!entry.isDirectory() && name.startsWith(prefix)) {
-                            names.add(name.substring(prefix.length()));
-                        }
-                    }
-                }
-            }
-        }
-        if (baseLayer) {
-            names.removeIf(name -> name.startsWith("_"));
-        }
-        names.removeAll(DYNAMIC_FILES);
-        return names;
+    private static boolean isLanguageOverlay(Path root, Path file) {
+        var relative = root.relativize(file);
+        return relative.getNameCount() > 1
+                && relative.getName(0).toString().startsWith("_");
     }
 
     private static void copyApiReference(Path output, String language) throws IOException {
-        var loader = ExportCommand.class.getClassLoader();
-        var localized = "en_us".equals(language)
-                ? null
-                : GUIDE_RESOURCE + "/_" + language + "/applied_factory/script_api.md";
-        var in = localized == null ? null : loader.getResourceAsStream(localized);
-        if (in == null) {
-            in = loader.getResourceAsStream(
-                    GUIDE_RESOURCE + "/applied_factory/script_api.md");
-        }
-        if (in == null) {
+        var fallback = modResource(GUIDE_RESOURCE + "/applied_factory/script_api.md");
+        var localized = modResource(
+                GUIDE_RESOURCE + "/_" + language + "/applied_factory/script_api.md");
+        var selected = !"en_us".equals(language) && Files.isRegularFile(localized)
+                ? localized : fallback;
+        if (!Files.isRegularFile(selected)) {
             throw new IOException("Missing bundled script API reference");
         }
-        try (InputStream selected = in) {
-            var markdown = new String(selected.readAllBytes(), StandardCharsets.UTF_8);
-            Files.writeString(output, stripFrontmatter(markdown), StandardCharsets.UTF_8);
+        var markdown = Files.readString(selected, StandardCharsets.UTF_8);
+        Files.writeString(output, stripFrontmatter(markdown), StandardCharsets.UTF_8);
+    }
+
+    private static Path modResource(String resource) throws IOException {
+        var modFile = ModList.get().getModFileById(AppliedFactory.MOD_ID);
+        if (modFile == null) {
+            throw new IOException("Applied Factory mod file is unavailable");
         }
+        return modFile.getFile().findResource(resource.split("/"));
+    }
+
+    private static String portable(Path path) {
+        return path.toString().replace('\\', '/');
     }
 
     private static String stripFrontmatter(String markdown) {

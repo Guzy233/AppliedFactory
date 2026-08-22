@@ -15,10 +15,12 @@ import com.fulent.appliedfactory.network.SaveControllerProgramPayload;
 import com.fulent.appliedfactory.network.SetControllerLogSubscriptionPayload;
 import com.fulent.appliedfactory.script.ControllerProgram;
 
+import net.minecraft.Util;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.MultiLineEditBox;
 import net.minecraft.client.gui.components.Tooltip;
+import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Inventory;
@@ -35,6 +37,7 @@ public final class FactoryControllerProgramScreen
     private static final int FILE_ROW_HEIGHT = 19;
     private static final int EDITOR_DECORATION_RIGHT = 10;
     private static final int EDITOR_DECORATION_BOTTOM = 15;
+    private static final long AUTO_RELOAD_DEBOUNCE_MILLIS = 300L;
 
     private final List<Button> fileButtons = new ArrayList<>();
     private MultiLineEditBox scriptBox;
@@ -42,12 +45,21 @@ public final class FactoryControllerProgramScreen
     private Button uploadButton;
     private Button pullButton;
     private Button mcpButton;
-    private List<String> workspaceFiles = List.of();
+    private Button autoReloadButton;
+    private List<WorkspaceEntry> workspaceEntries = List.of();
     private String selectedPath;
     private String remotePath = "";
     private String remoteSource = ControllerProgram.DEFAULT_SOURCE;
+    private long remoteUpdatedAt;
     private boolean sourceLoaded;
     private boolean logSubscribed;
+    private boolean autoReload;
+    private boolean uploadPending;
+    private String pendingUploadSource;
+    private String pendingUploadPath;
+    private String watchedPath;
+    private long watchedModifiedAt = -1L;
+    private long autoReloadDueAt = -1L;
     private int filePage;
     private Component saveStatus = Component.empty();
     private int saveStatusColor = 0xffa9d8e9;
@@ -99,7 +111,11 @@ public final class FactoryControllerProgramScreen
         logButton = addRenderableWidget(Button.builder(
                 Component.literal(logSubscribed ? "●" : "○"), ignored -> toggleLogSubscription())
                 .bounds(leftPos + imageWidth - 88, topPos + 5, 19, 18).build());
+        autoReloadButton = addRenderableWidget(Button.builder(
+                Component.literal("↻"), ignored -> toggleAutoReload())
+                .bounds(leftPos + imageWidth - 109, topPos + 5, 19, 18).build());
         updateLogButton();
+        updateAutoReloadButton();
 
         reloadWorkspaceFiles();
         if (!sourceLoaded) {
@@ -111,8 +127,16 @@ public final class FactoryControllerProgramScreen
 
     private void reloadWorkspaceFiles() {
         try {
-            workspaceFiles = ScriptWorkspaceFiles.list();
-            var pages = Math.max(1, (workspaceFiles.size() + rowsPerPage() - 1) / rowsPerPage());
+            var files = ScriptWorkspaceFiles.list();
+            var entries = new ArrayList<WorkspaceEntry>(files.size() + 1);
+            for (var path : files) {
+                entries.add(new WorkspaceEntry(path, false));
+                if (isRemoteConflict(path)) {
+                    entries.add(new WorkspaceEntry(path, true));
+                }
+            }
+            workspaceEntries = List.copyOf(entries);
+            var pages = Math.max(1, (workspaceEntries.size() + rowsPerPage() - 1) / rowsPerPage());
             filePage = Math.min(filePage, pages - 1);
             rebuildFileButtons();
         } catch (IOException exception) {
@@ -124,11 +148,18 @@ public final class FactoryControllerProgramScreen
         fileButtons.forEach(this::removeWidget);
         fileButtons.clear();
         var first = filePage * rowsPerPage();
-        var last = Math.min(workspaceFiles.size(), first + rowsPerPage());
+        var last = Math.min(workspaceEntries.size(), first + rowsPerPage());
         for (int index = first; index < last; index++) {
-            var path = workspaceFiles.get(index);
-            var label = font.plainSubstrByWidth(path, FILES_WIDTH - 20);
-            var button = Button.builder(Component.literal(label), ignored -> selectFile(path))
+            var entry = workspaceEntries.get(index);
+            var labelWidth = FILES_WIDTH - 20;
+            var label = font.plainSubstrByWidth(entry.path(), labelWidth);
+            if (entry.remote()) {
+                var suffix = Component.translatable(
+                        "gui.appliedfactory.remote_file_suffix").getString();
+                label = font.plainSubstrByWidth(
+                        entry.path(), Math.max(0, labelWidth - font.width(suffix))) + suffix;
+            }
+            var button = Button.builder(Component.literal(label), ignored -> selectEntry(entry))
                     .bounds(leftPos + MARGIN, topPos + HEADER_HEIGHT + MARGIN
                             + (index - first) * FILE_ROW_HEIGHT,
                             FILES_WIDTH - MARGIN, 18).build();
@@ -142,7 +173,7 @@ public final class FactoryControllerProgramScreen
             }
         }).bounds(leftPos + MARGIN, navigationY, 22, 18).build()));
         fileButtons.add(addRenderableWidget(Button.builder(Component.literal(">"), ignored -> {
-            if ((filePage + 1) * rowsPerPage() < workspaceFiles.size()) {
+            if ((filePage + 1) * rowsPerPage() < workspaceEntries.size()) {
                 filePage++;
                 rebuildFileButtons();
             }
@@ -157,6 +188,15 @@ public final class FactoryControllerProgramScreen
         return Math.max(1, (imageHeight - HEADER_HEIGHT - 45) / FILE_ROW_HEIGHT);
     }
 
+    private void selectEntry(WorkspaceEntry entry) {
+        if (entry.remote()) {
+            showRemoteSource();
+            setStatus("gui.appliedfactory.remote_snapshot", 0xffffd37a);
+        } else {
+            selectFile(entry.path());
+        }
+    }
+
     private void selectFile(String path) {
         try {
             var source = ScriptWorkspaceFiles.read(path);
@@ -166,6 +206,7 @@ public final class FactoryControllerProgramScreen
             }
             selectedPath = path;
             scriptBox.setValue(source);
+            armFileWatcher(path);
             setLiteralStatus("", 0xffa9d8e9);
             updateButtonStates();
         } catch (IOException | IllegalArgumentException exception) {
@@ -178,12 +219,21 @@ public final class FactoryControllerProgramScreen
             setStatus("gui.appliedfactory.local_backup_required", 0xffff7d7d);
             return;
         }
-        var source = scriptBox.getValue();
+        uploadProgram(selectedPath, scriptBox.getValue(), true);
+    }
+
+    private void uploadProgram(String path, String source, boolean writeLocal) {
+        if (uploadPending) {
+            return;
+        }
         final String compiled;
         try {
-            ScriptBundler.requireTypeScriptEntry(selectedPath);
-            ScriptWorkspaceFiles.write(selectedPath, source);
-            compiled = ScriptBundler.bundle(source, ScriptWorkspaceFiles.absolute(selectedPath).getParent());
+            ScriptBundler.requireTypeScriptEntry(path);
+            if (writeLocal) {
+                ScriptWorkspaceFiles.write(path, source);
+                armFileWatcher(path);
+            }
+            compiled = ScriptBundler.bundle(source, ScriptWorkspaceFiles.absolute(path).getParent());
         } catch (IOException | IllegalArgumentException | McpToolException exception) {
             setLiteralStatus("Precompile failed: " + exception.getMessage(), 0xffff7d7d);
             return;
@@ -194,9 +244,13 @@ public final class FactoryControllerProgramScreen
                     ControllerProgram.MAX_SOURCE_LENGTH);
             return;
         }
+        uploadPending = true;
+        pendingUploadSource = source;
+        pendingUploadPath = path;
         setStatus("gui.appliedfactory.saving", 0xffffd37a);
         PacketDistributor.sendToServer(new SaveControllerProgramPayload(
-                menu.getBlockPos(), source, compiled, selectedPath));
+                menu.getBlockPos(), source, compiled, path));
+        updateButtonStates();
     }
 
     private void pullRemoteProgram() {
@@ -204,16 +258,35 @@ public final class FactoryControllerProgramScreen
             return;
         }
         try {
-            String path;
             if (!remotePath.isBlank() && ScriptWorkspaceFiles.exists(remotePath)
-                    && ScriptWorkspaceFiles.read(remotePath).equals(remoteSource)) {
-                path = remotePath;
-            } else {
-                path = ScriptWorkspaceFiles.availableDownloadPath(remotePath);
+                    && !ScriptWorkspaceFiles.read(remotePath).equals(remoteSource)) {
+                var path = remotePath;
+                minecraft.setScreen(new ConfirmScreen(confirmed -> {
+                    minecraft.setScreen(this);
+                    if (confirmed) {
+                        writeRemoteFile(path);
+                    }
+                }, Component.translatable("gui.appliedfactory.confirm_pull_title"),
+                        Component.translatable("gui.appliedfactory.confirm_pull", path)));
+                return;
+            }
+            var path = !remotePath.isBlank() && ScriptWorkspaceFiles.exists(remotePath)
+                    ? remotePath : ScriptWorkspaceFiles.availableDownloadPath(remotePath);
+            writeRemoteFile(path);
+        } catch (IOException | IllegalArgumentException exception) {
+            setLiteralStatus("Pull failed: " + exception.getMessage(), 0xffff7d7d);
+        }
+    }
+
+    private void writeRemoteFile(String path) {
+        try {
+            if (!ScriptWorkspaceFiles.exists(path)
+                    || !ScriptWorkspaceFiles.read(path).equals(remoteSource)) {
                 ScriptWorkspaceFiles.write(path, remoteSource);
             }
             selectedPath = path;
             scriptBox.setValue(remoteSource);
+            armFileWatcher(path);
             reloadWorkspaceFiles();
             setStatus("gui.appliedfactory.pull_success", 0xff8fe3a1);
             updateButtonStates();
@@ -256,13 +329,19 @@ public final class FactoryControllerProgramScreen
         if (!menu.getBlockPos().equals(payload.pos())) {
             return;
         }
-        if (payload.saved()) {
-            remoteSource = scriptBox.getValue();
-            remotePath = selectedPath;
+        uploadPending = false;
+        if (payload.saved() && pendingUploadSource != null && pendingUploadPath != null) {
+            remoteSource = pendingUploadSource;
+            remotePath = pendingUploadPath;
+            remoteUpdatedAt = payload.updatedAt();
             setStatus("gui.appliedfactory.save_success", 0xff8fe3a1);
         } else {
             setStatus("gui.appliedfactory.syntax_error", 0xffff7d7d, payload.message());
         }
+        pendingUploadSource = null;
+        pendingUploadPath = null;
+        reloadWorkspaceFiles();
+        updateButtonStates();
     }
 
     public void showProgramContent(ControllerProgramContentPayload payload) {
@@ -272,32 +351,44 @@ public final class FactoryControllerProgramScreen
         sourceLoaded = true;
         remoteSource = payload.source();
         remotePath = payload.workspacePath();
+        remoteUpdatedAt = payload.updatedAt();
         if (selectedPath != null) {
+            reloadWorkspaceFiles();
             updateButtonStates();
             return;
         }
-        selectedPath = null;
         try {
-            if (!remotePath.isBlank() && ScriptWorkspaceFiles.exists(remotePath)
-                    && ScriptWorkspaceFiles.read(remotePath).equals(remoteSource)) {
-                selectedPath = remotePath;
+            if (!remotePath.isBlank() && ScriptWorkspaceFiles.exists(remotePath)) {
+                var localSource = ScriptWorkspaceFiles.read(remotePath);
+                if (localSource.equals(remoteSource)) {
+                    selectFile(remotePath);
+                    setStatus("gui.appliedfactory.local_file_matched", 0xffa9d8e9);
+                } else if (ScriptWorkspaceFiles.lastModifiedMillis(remotePath) > remoteUpdatedAt) {
+                    selectFile(remotePath);
+                    setStatus("gui.appliedfactory.local_file_newer", 0xffffd37a);
+                } else {
+                    showRemoteSource();
+                    setStatus("gui.appliedfactory.remote_file_newer", 0xffffd37a);
+                }
+                reloadWorkspaceFiles();
+                updateButtonStates();
+                return;
             }
         } catch (IOException | IllegalArgumentException ignored) {
-            selectedPath = null;
+            // Fall through to the unbacked remote view.
         }
-        scriptBox.setValue(remoteSource);
-        setStatus(selectedPath == null
-                ? "gui.appliedfactory.remote_unbacked"
-                : "gui.appliedfactory.local_file_matched", 0xffa9d8e9);
+        showRemoteSource();
+        setStatus("gui.appliedfactory.remote_unbacked", 0xffa9d8e9);
+        reloadWorkspaceFiles();
         updateButtonStates();
     }
 
     private void updateButtonStates() {
         if (uploadButton != null) {
-            uploadButton.active = sourceLoaded && selectedPath != null;
+            uploadButton.active = sourceLoaded && selectedPath != null && !uploadPending;
         }
         if (pullButton != null) {
-            pullButton.active = sourceLoaded && selectedPath == null;
+            pullButton.active = sourceLoaded && selectedPath == null && !uploadPending;
         }
     }
 
@@ -331,7 +422,7 @@ public final class FactoryControllerProgramScreen
                 && mouseY >= topPos + HEADER_HEIGHT
                 && mouseY < topPos + imageHeight) {
             var nextPage = filePage + (verticalAmount > 0 ? -1 : verticalAmount < 0 ? 1 : 0);
-            var lastPage = Math.max(0, (workspaceFiles.size() - 1) / rowsPerPage());
+            var lastPage = Math.max(0, (workspaceEntries.size() - 1) / rowsPerPage());
             nextPage = Math.max(0, Math.min(lastPage, nextPage));
             if (nextPage != filePage) {
                 filePage = nextPage;
@@ -351,6 +442,7 @@ public final class FactoryControllerProgramScreen
         super.containerTick();
         mcpButton.setTooltip(Tooltip.create(Component.translatable(
                 boundHere() ? "gui.appliedfactory.unbind_mcp" : "gui.appliedfactory.bind_mcp")));
+        pollAutoReload();
     }
 
     @Override
@@ -398,7 +490,7 @@ public final class FactoryControllerProgramScreen
         var fileName = currentFileName();
         var status = saveStatus.getString();
         var caption = status.isEmpty() ? fileName : fileName + ":" + status;
-        graphics.drawString(font, font.plainSubstrByWidth(caption, imageWidth - 108),
+        graphics.drawString(font, font.plainSubstrByWidth(caption, imageWidth - 129),
                 10, 10, saveStatusColor);
     }
 
@@ -409,5 +501,88 @@ public final class FactoryControllerProgramScreen
         }
         var slash = path.lastIndexOf('/');
         return slash < 0 ? path : path.substring(slash + 1);
+    }
+
+    private boolean isRemoteConflict(String path) {
+        if (!sourceLoaded || remotePath.isBlank() || !remotePath.equals(path)) {
+            return false;
+        }
+        try {
+            return !ScriptWorkspaceFiles.read(path).equals(remoteSource);
+        } catch (IOException | IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private void showRemoteSource() {
+        selectedPath = null;
+        watchedPath = null;
+        watchedModifiedAt = -1L;
+        autoReloadDueAt = -1L;
+        scriptBox.setValue(remoteSource);
+        updateButtonStates();
+    }
+
+    private void toggleAutoReload() {
+        autoReload = !autoReload;
+        autoReloadDueAt = -1L;
+        if (autoReload && selectedPath != null) {
+            armFileWatcher(selectedPath);
+        }
+        setStatus(autoReload
+                ? "gui.appliedfactory.auto_reload_enabled"
+                : "gui.appliedfactory.auto_reload_disabled", 0xffa9d8e9);
+        updateAutoReloadButton();
+    }
+
+    private void updateAutoReloadButton() {
+        if (autoReloadButton == null) {
+            return;
+        }
+        autoReloadButton.setMessage(Component.literal(autoReload ? "⟳" : "↻"));
+        autoReloadButton.setTooltip(Tooltip.create(Component.translatable(autoReload
+                ? "gui.appliedfactory.disable_auto_reload"
+                : "gui.appliedfactory.enable_auto_reload")));
+    }
+
+    private void armFileWatcher(String path) {
+        watchedPath = path;
+        autoReloadDueAt = -1L;
+        try {
+            watchedModifiedAt = ScriptWorkspaceFiles.lastModifiedMillis(path);
+        } catch (IOException | IllegalArgumentException ignored) {
+            watchedModifiedAt = -1L;
+        }
+    }
+
+    private void pollAutoReload() {
+        if (!autoReload || selectedPath == null) {
+            return;
+        }
+        if (!selectedPath.equals(watchedPath)) {
+            armFileWatcher(selectedPath);
+            return;
+        }
+        try {
+            var modifiedAt = ScriptWorkspaceFiles.lastModifiedMillis(selectedPath);
+            if (modifiedAt != watchedModifiedAt) {
+                watchedModifiedAt = modifiedAt;
+                autoReloadDueAt = Util.getMillis() + AUTO_RELOAD_DEBOUNCE_MILLIS;
+                return;
+            }
+            if (autoReloadDueAt < 0L || Util.getMillis() < autoReloadDueAt || uploadPending) {
+                return;
+            }
+            autoReloadDueAt = -1L;
+            var source = ScriptWorkspaceFiles.read(selectedPath);
+            scriptBox.setValue(source);
+            uploadProgram(selectedPath, source, false);
+        } catch (IOException | IllegalArgumentException exception) {
+            autoReloadDueAt = -1L;
+            setLiteralStatus("Auto reload failed: " + exception.getMessage(), 0xffff7d7d);
+        }
+    }
+
+    private record WorkspaceEntry(String path, boolean remote) {
     }
 }

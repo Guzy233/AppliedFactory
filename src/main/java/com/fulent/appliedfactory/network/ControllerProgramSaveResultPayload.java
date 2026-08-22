@@ -10,7 +10,8 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 
 /** Server-side compilation result displayed by the controller program editor. */
-public record ControllerProgramSaveResultPayload(BlockPos pos, boolean saved, String message)
+public record ControllerProgramSaveResultPayload(
+        BlockPos pos, boolean saved, String message, long updatedAt)
         implements CustomPacketPayload {
     private static final int MAX_MESSAGE_LENGTH = 2_048;
 
@@ -24,6 +25,7 @@ public record ControllerProgramSaveResultPayload(BlockPos pos, boolean saved, St
                     ByteBufCodecs.BOOL, ControllerProgramSaveResultPayload::saved,
                     ByteBufCodecs.stringUtf8(MAX_MESSAGE_LENGTH),
                     ControllerProgramSaveResultPayload::message,
+                    ByteBufCodecs.VAR_LONG, ControllerProgramSaveResultPayload::updatedAt,
                     ControllerProgramSaveResultPayload::new);
 
     @Override

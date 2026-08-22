@@ -103,7 +103,8 @@ public final class NetworkHandler {
                 payload.source(), payload.compiledSource(), payload.workspacePath());
         PacketDistributor.sendToPlayer(player, new ControllerProgramSaveResultPayload(
                 payload.pos(), result.successful(),
-                result.successful() ? "" : result.errorMessage()));
+                result.successful() ? "" : result.errorMessage(),
+                factory.getControllerProgramUpdatedAt()));
         if (result.successful()) {
             player.containerMenu.broadcastChanges();
         }
@@ -116,7 +117,8 @@ public final class NetworkHandler {
             return;
         }
         PacketDistributor.sendToPlayer(player, new ControllerProgramContentPayload(
-                payload.pos(), factory.getControllerProgram(), factory.getControllerProgramPath()));
+                payload.pos(), factory.getControllerProgram(), factory.getControllerProgramPath(),
+                factory.getControllerProgramUpdatedAt()));
     }
 
     private static void handleSetControllerLogSubscription(

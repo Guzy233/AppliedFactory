@@ -99,6 +99,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
     private String controllerProgram = ControllerProgram.DEFAULT_SOURCE;
     private String compiledControllerProgram = ControllerProgram.DEFAULT_SOURCE;
     private String controllerProgramPath = "";
+    private long controllerProgramUpdatedAt;
     /** UUID reference into the world-level ControllerProgramStore; never carries source in chunk NBT. */
     private UUID controllerProgramId;
     private boolean patternsDirty = true;
@@ -181,6 +182,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         controllerProgram = loadedProgram.source();
         compiledControllerProgram = loadedProgram.compiledSource();
         controllerProgramPath = loadedProgram.workspacePath();
+        controllerProgramUpdatedAt = loadedProgram.updatedAt();
         logSubscribers.clear();
         reportedScriptFailures.clear();
         var savedSubscribers = tag.getList(ERROR_SUBSCRIBERS_NBT_KEY, Tag.TAG_COMPOUND);
@@ -274,6 +276,10 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         return controllerProgramPath;
     }
 
+    public long getControllerProgramUpdatedAt() {
+        return controllerProgramUpdatedAt;
+    }
+
     public boolean isLogSubscribed(UUID playerId) {
         return logSubscribers.contains(playerId);
     }
@@ -308,6 +314,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         controllerProgram = source;
         compiledControllerProgram = compiledSource;
         controllerProgramPath = workspacePath;
+        controllerProgramUpdatedAt = Math.max(
+                System.currentTimeMillis(), controllerProgramUpdatedAt + 1L);
         ensureControllerProgramStored();
         program = result.program();
         programInitialized = true;
@@ -344,7 +352,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             programStoreResolved = false;
             var source = ControllerProgram.isWithinLimit(legacySource)
                     ? legacySource : ControllerProgram.DEFAULT_SOURCE;
-            return new ControllerProgramSources(source, source, "");
+            return new ControllerProgramSources(source, source, "", 0L);
         }
         var store = ControllerProgramStore.get(serverLevel);
         var storedSource = store.get(controllerProgramId);
@@ -356,7 +364,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         // legacy value when possible, then self-heal the world-level record.
         var source = ControllerProgram.isWithinLimit(legacySource)
                 ? legacySource : ControllerProgram.DEFAULT_SOURCE;
-        var programSources = new ControllerProgramSources(source, source, "");
+        var programSources = new ControllerProgramSources(source, source, "", 0L);
         store.put(controllerProgramId, programSources);
         programStoreResolved = true;
         return programSources;
@@ -381,11 +389,13 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             controllerProgram = sources.source();
             compiledControllerProgram = sources.compiledSource();
             controllerProgramPath = sources.workspacePath();
+            controllerProgramUpdatedAt = sources.updatedAt();
             programStoreResolved = true;
             return;
         }
         store.put(controllerProgramId, new ControllerProgramSources(
-                controllerProgram, compiledControllerProgram, controllerProgramPath));
+                controllerProgram, compiledControllerProgram, controllerProgramPath,
+                controllerProgramUpdatedAt));
         programStoreResolved = true;
     }
 
@@ -399,7 +409,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         }
         ControllerProgramStore.get(serverLevel).put(controllerProgramId,
                 new ControllerProgramSources(
-                        controllerProgram, compiledControllerProgram, controllerProgramPath));
+                        controllerProgram, compiledControllerProgram, controllerProgramPath,
+                        controllerProgramUpdatedAt));
     }
 
     private void removeStoredControllerProgram() {

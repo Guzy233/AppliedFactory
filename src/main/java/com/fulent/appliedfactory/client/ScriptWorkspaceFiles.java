@@ -44,6 +44,10 @@ final class ScriptWorkspaceFiles {
         }
     }
 
+    static long lastModifiedMillis(String relativePath) throws IOException {
+        return Files.getLastModifiedTime(resolve(relativePath)).toMillis();
+    }
+
     static String availableDownloadPath(String suggestedPath) {
         var safeSuggestion = safeSuggestion(suggestedPath);
         if (!exists(safeSuggestion)) {
