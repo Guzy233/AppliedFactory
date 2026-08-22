@@ -21,4 +21,6 @@ Open the controller and choose a TypeScript file from the `appliedscripts/` brow
 
 The controller can be linked to the local MCP server. Use `appliedfactory_execute` for probe programs and `appliedfactory_upload` only after validating the production program.
 
-Only relative default JSON imports are supported, for example `import recipes from "./recipes.json"`. JSON imports and recipe macros resolve from the selected script's directory. Editable source, executable source, and the workspace-relative path are stored in world-level data rather than controller chunk NBT.
+Only relative default JSON imports are supported, for example `import recipes from "./recipes.json"`. JSON imports and recipe macros resolve from the selected script's directory.
+
+See the [Script API](script_api.md) for functions, objects and examples.

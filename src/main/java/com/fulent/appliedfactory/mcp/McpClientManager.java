@@ -91,7 +91,6 @@ public final class McpClientManager {
             }
             if (result.accepted()) {
                 binding = new McpBinding(result.dimension(), result.pos(), result.label());
-                McpConfig.write(DEFAULT_PORT, binding);
                 if (!isRunning()) {
                     if (start(DEFAULT_PORT)) {
                         mc.player.sendSystemMessage(Component.literal(
@@ -118,6 +117,5 @@ public final class McpClientManager {
     public void unbind() {
         binding = null;
         stop();
-        McpConfig.write(DEFAULT_PORT, null);
     }
 }

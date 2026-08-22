@@ -15,9 +15,9 @@ The "bus" below and in the API docs refers to the "Factory Bus", a kind of AE2 p
   (compile-checked; on failure the existing program is untouched). Same inline `source` / `file`
   choice as execute.
 
-If you never see these tools in your toolset, remind the user to configure the MCP server
-(http://localhost:39291/mcp) for the specific agent scaffold you are in, ask the user whether you
-should do the configuration, and remind them to restart the app afterwards.
+If these tools are missing, verify that this workspace is trusted and that its project-local MCP
+configuration was loaded (`.codex/config.toml` for Codex). The endpoint is
+`http://127.0.0.1:39291/mcp`; restart the agent after changing its MCP configuration.
 
 ## Rules
 
@@ -42,7 +42,7 @@ should do the configuration, and remind them to restart the app afterwards.
   you'd better multiply both the inputs and outputs so that they can be processed in one go.
 - Use `require_recipes(spec)` for filtered recipe batches. General JSON data may be imported with a relative default import such as `import data from "./data.json"`; importing TypeScript/JavaScript modules is not supported.
 - Source files are TypeScript and are precompiled to ES2022 JavaScript before the GraalJS runtime loads them. The IDE owns full type checking; upload performs syntax-oriented transpilation only.
-- The API reference can be found in this folder ("./").
+- The API reference can be found in this folder (`SCRIPT_API.md`).
 - Most machines do not expose extraction capabilities for input resources, as doing so would cause inputs to be pulled unintentionally. Therefore, it makes sense for `storage()` to return a larger resource list. Meanwhile, resources appearing in `storage()` but not in `extract()` are most likely previous or in-flight inputs.
 - All valid values of `ResourceChannel` can be processed by a pattern handler — some addons have registered them as available channels.
 - Empty resources and ResourceArrays can be safely transferred (no-op), so extra checks are not needed.

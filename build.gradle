@@ -140,22 +140,6 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
 sourceSets.main.resources.srcDir generateModMetadata
 neoForge.ideSyncTask generateModMetadata
 
-// include docs for conding agents
-// Sync (not Copy) so files removed from appliedscripts are also removed from
-// the packaged docs instead of lingering from earlier builds.
-var generateDocs = tasks.register("generateDocs", Sync) {
-    from("appliedscripts") {
-        include "*"
-        exclude "channels.json"
-        exclude "processing_recipes.json"
-        exclude "recipe_types.json"
-        into "assets/appliedfactory/docs"
-    }
-    into "build/generated/docsResources"
-}
-sourceSets.main.resources.srcDir generateDocs
-neoForge.ideSyncTask generateDocs
-
 // ModLauncher exposes GraalJS classes from dependency jars, but not arbitrary
 // WebJar resources through the transformed mod class loader. Copy the pinned
 // compiler bundle into this mod's own resource namespace for both dev and production.

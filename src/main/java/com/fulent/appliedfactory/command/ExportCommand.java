@@ -1,6 +1,7 @@
 package com.fulent.appliedfactory.command;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,6 +12,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -48,8 +50,8 @@ import appeng.api.stacks.AEKeyTypes;
  * <p>{@code /appliedfactory export [dir]} writes the dynamic data — recipes and
  * AE key-type channels — into {@code <dir or game root>/appliedscripts/}.
  * {@code /appliedfactory setupworkspace [dir]} additionally restores the
- * documentation files the build packaged into
- * {@code assets/appliedfactory/docs/}, reproducing the whole agent workspace.
+ * localized files bundled in {@code assets/appliedfactory/appliedscripts/}
+ * and the matching Guide API page, reproducing the whole agent workspace.
  *
  * <p>Recipes are exported as {@code {id, type, inputs, outputs, json}} entries
  * where inputs/outputs use the same {@code {channel, key, amount}} shape the
@@ -69,7 +71,8 @@ import appeng.api.stacks.AEKeyTypes;
  * agent configs) are left untouched.
  */
 public final class ExportCommand {
-    private static final String DOCS_RESOURCE = "assets/appliedfactory/docs";
+    private static final String WORKSPACE_RESOURCE = "assets/appliedfactory/appliedscripts";
+    private static final String GUIDE_RESOURCE = "assets/appliedfactory/ae2guide";
     private static final Set<String> DYNAMIC_FILES =
             Set.of("channels.json", "processing_recipes.json", "recipe_types.json");
 
@@ -123,7 +126,9 @@ public final class ExportCommand {
         try {
             var root = resolveRoot(server, dir);
             Files.createDirectories(root);
-            var docs = copyPackagedDocs(root);
+            var player = source.getPlayer();
+            var language = normalizeLanguage(player == null ? "en_us" : player.getLanguage());
+            var docs = copyPackagedDocs(root, language);
             writeRecipeTypes(server, root);
             exportRecipes(server, root, source.getPlayer());
             writeChannels(root);
@@ -346,8 +351,8 @@ public final class ExportCommand {
     }
 
     /**
-     * Restores the documentation files that {@code generateDocs} packaged into
-     * {@code assets/appliedfactory/docs/} at build time. Sources are probed in
+     * Restores the workspace assets, then applies the player's language overlay.
+     * Sources are probed in
      * order: classpath directory resources (dev runs read the built resources
      * directory), then the mod jar's zip entries (production), then a hardcoded
      * fallback list. Each file is read through the classloader, so jar and
@@ -355,29 +360,41 @@ public final class ExportCommand {
      *
      * @return the number of doc files written
      */
-    private static int copyPackagedDocs(Path root) throws IOException {
-        var names = packagedDocNames();
+    private static int copyPackagedDocs(Path root, String language) throws IOException {
+        var copied = copyPackagedLayer(root, WORKSPACE_RESOURCE, true);
+        if (!"en_us".equals(language)) {
+            copied += copyPackagedLayer(
+                    root, WORKSPACE_RESOURCE + "/_" + language, false);
+        }
+        copyApiReference(root.resolve("SCRIPT_API.md"), language);
+        return copied + 1;
+    }
+
+    private static int copyPackagedLayer(
+            Path root, String resourceRoot, boolean baseLayer) throws IOException {
+        var names = packagedDocNames(resourceRoot, baseLayer);
         var copied = 0;
         var loader = ExportCommand.class.getClassLoader();
         for (var name : names) {
-            try (var in = loader.getResourceAsStream(DOCS_RESOURCE + "/" + name)) {
+            try (var in = loader.getResourceAsStream(resourceRoot + "/" + name)) {
                 if (in == null) {
                     continue;
                 }
-                Files.copy(in, root.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+                var output = root.resolve(name);
+                Files.createDirectories(output.getParent());
+                Files.copy(in, output, StandardCopyOption.REPLACE_EXISTING);
                 copied++;
             }
         }
         return copied;
     }
 
-    private static Set<String> packagedDocNames() throws IOException {
+    private static Set<String> packagedDocNames(
+            String resourceRoot, boolean baseLayer) throws IOException {
         var names = new LinkedHashSet<String>();
-        // 1. Classpath directories: dev runs expose the built resources
-        //    directory (build/resources/main, ...) whose docs/ subtree mirrors
-        //    the generateDocs packaging.
+        // 1. Classpath directories used by development runs.
         var loader = ExportCommand.class.getClassLoader();
-        var resources = loader.getResources(DOCS_RESOURCE);
+        var resources = loader.getResources(resourceRoot);
         while (resources.hasMoreElements()) {
             var url = resources.nextElement();
             if (!"file".equals(url.getProtocol())) {
@@ -392,9 +409,9 @@ public final class ExportCommand {
             if (!Files.isDirectory(dir)) {
                 continue;
             }
-            try (var files = Files.list(dir)) {
+            try (var files = Files.walk(dir)) {
                 files.filter(Files::isRegularFile)
-                        .map(path -> path.getFileName().toString())
+                        .map(path -> dir.relativize(path).toString().replace('\\', '/'))
                         .forEach(names::add);
             }
         }
@@ -404,7 +421,7 @@ public final class ExportCommand {
             var filePath = modFile == null ? null : modFile.getFile().getFilePath();
             if (filePath != null && Files.isRegularFile(filePath)) {
                 try (var zip = new ZipFile(filePath.toFile())) {
-                    var prefix = DOCS_RESOURCE + "/";
+                    var prefix = resourceRoot + "/";
                     for (var entry : Collections.list(zip.entries())) {
                         var name = entry.getName();
                         if (!entry.isDirectory() && name.startsWith(prefix)) {
@@ -414,12 +431,45 @@ public final class ExportCommand {
                 }
             }
         }
-        // 3. Hardcoded fallback in case neither source is discoverable.
-        if (names.isEmpty()) {
-            names.addAll(List.of(
-                    "SCRIPT_API.md", "applied_factory.d.ts", "agents.md", "demo.ts", "tsconfig.json"));
+        if (baseLayer) {
+            names.removeIf(name -> name.startsWith("_"));
         }
         names.removeAll(DYNAMIC_FILES);
         return names;
+    }
+
+    private static void copyApiReference(Path output, String language) throws IOException {
+        var loader = ExportCommand.class.getClassLoader();
+        var localized = "en_us".equals(language)
+                ? null
+                : GUIDE_RESOURCE + "/_" + language + "/applied_factory/script_api.md";
+        var in = localized == null ? null : loader.getResourceAsStream(localized);
+        if (in == null) {
+            in = loader.getResourceAsStream(
+                    GUIDE_RESOURCE + "/applied_factory/script_api.md");
+        }
+        if (in == null) {
+            throw new IOException("Missing bundled script API reference");
+        }
+        try (InputStream selected = in) {
+            var markdown = new String(selected.readAllBytes(), StandardCharsets.UTF_8);
+            Files.writeString(output, stripFrontmatter(markdown), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static String stripFrontmatter(String markdown) {
+        var normalized = markdown.replace("\r\n", "\n");
+        if (!normalized.startsWith("---\n")) {
+            return markdown;
+        }
+        var end = normalized.indexOf("\n---\n", 4);
+        return end < 0 ? markdown : normalized.substring(end + 5);
+    }
+
+    private static String normalizeLanguage(String language) {
+        if (language == null || language.isBlank()) {
+            return "en_us";
+        }
+        return language.toLowerCase(Locale.ROOT).replace('-', '_');
     }
 }

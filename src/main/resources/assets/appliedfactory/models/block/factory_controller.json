@@ -1,12 +1,104 @@
 {
-  "parent": "minecraft:block/cube",
+  "ambientocclusion": true,
   "textures": {
     "particle": "appliedfactory:block/factory_controller_casing",
-    "down": "appliedfactory:block/factory_controller_casing",
-    "up": "appliedfactory:block/factory_controller_casing",
-    "north": "appliedfactory:block/factory_controller_front",
-    "south": "appliedfactory:block/factory_controller_casing",
-    "west": "appliedfactory:block/factory_controller_casing",
-    "east": "appliedfactory:block/factory_controller_casing"
-  }
+    "casing": "appliedfactory:block/factory_controller_casing",
+    "front": "appliedfactory:block/factory_controller_front"
+  },
+  "elements": [
+    {
+      "name": "recessed_body",
+      "from": [1, 1, 1],
+      "to": [15, 15, 15],
+      "faces": {
+        "down": { "texture": "#casing", "cullface": "down" },
+        "up": { "texture": "#casing", "cullface": "up" },
+        "north": { "texture": "#casing" },
+        "south": { "texture": "#casing", "cullface": "south" },
+        "west": { "texture": "#casing", "cullface": "west" },
+        "east": { "texture": "#casing", "cullface": "east" }
+      }
+    },
+    {
+      "name": "top_frame",
+      "from": [0, 14, 0],
+      "to": [16, 16, 16],
+      "faces": {
+        "down": { "texture": "#casing" },
+        "up": { "texture": "#casing", "cullface": "up" },
+        "north": { "texture": "#casing", "cullface": "north" },
+        "south": { "texture": "#casing", "cullface": "south" },
+        "west": { "texture": "#casing", "cullface": "west" },
+        "east": { "texture": "#casing", "cullface": "east" }
+      }
+    },
+    {
+      "name": "bottom_frame",
+      "from": [0, 0, 0],
+      "to": [16, 2, 16],
+      "faces": {
+        "down": { "texture": "#casing", "cullface": "down" },
+        "up": { "texture": "#casing" },
+        "north": { "texture": "#casing", "cullface": "north" },
+        "south": { "texture": "#casing", "cullface": "south" },
+        "west": { "texture": "#casing", "cullface": "west" },
+        "east": { "texture": "#casing", "cullface": "east" }
+      }
+    },
+    {
+      "name": "left_frame",
+      "from": [0, 2, 0],
+      "to": [2, 14, 16],
+      "faces": {
+        "down": { "texture": "#casing" },
+        "up": { "texture": "#casing" },
+        "north": { "texture": "#casing", "cullface": "north" },
+        "south": { "texture": "#casing", "cullface": "south" },
+        "west": { "texture": "#casing", "cullface": "west" },
+        "east": { "texture": "#casing" }
+      }
+    },
+    {
+      "name": "right_frame",
+      "from": [14, 2, 0],
+      "to": [16, 14, 16],
+      "faces": {
+        "down": { "texture": "#casing" },
+        "up": { "texture": "#casing" },
+        "north": { "texture": "#casing", "cullface": "north" },
+        "south": { "texture": "#casing", "cullface": "south" },
+        "west": { "texture": "#casing" },
+        "east": { "texture": "#casing", "cullface": "east" }
+      }
+    },
+    {
+      "name": "front_bezel",
+      "from": [2, 2, 0],
+      "to": [14, 14, 1],
+      "faces": {
+        "down": { "texture": "#casing" },
+        "up": { "texture": "#casing" },
+        "north": { "texture": "#casing", "cullface": "north" },
+        "west": { "texture": "#casing" },
+        "east": { "texture": "#casing" }
+      }
+    },
+    {
+      "name": "front_display",
+      "from": [3, 3, -0.25],
+      "to": [13, 13, 0],
+      "shade": false,
+      "faces": {
+        "north": { "uv": [0, 0, 16, 16], "texture": "#front", "cullface": "north" }
+      }
+    },
+    {
+      "name": "rear_service_plate",
+      "from": [4, 4, 15],
+      "to": [12, 12, 16],
+      "faces": {
+        "south": { "texture": "#casing", "cullface": "south" }
+      }
+    }
+  ]
 }

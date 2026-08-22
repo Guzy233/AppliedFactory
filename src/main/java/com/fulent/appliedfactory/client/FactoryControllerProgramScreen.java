@@ -33,6 +33,8 @@ public final class FactoryControllerProgramScreen
     private static final int HEADER_HEIGHT = 28;
     private static final int FILES_WIDTH = 190;
     private static final int FILE_ROW_HEIGHT = 19;
+    private static final int EDITOR_DECORATION_RIGHT = 10;
+    private static final int EDITOR_DECORATION_BOTTOM = 15;
 
     private final List<Button> fileButtons = new ArrayList<>();
     private MultiLineEditBox scriptBox;
@@ -65,8 +67,12 @@ public final class FactoryControllerProgramScreen
 
         var editorX = leftPos + FILES_WIDTH + MARGIN * 2;
         var editorY = topPos + HEADER_HEIGHT + MARGIN;
-        var editorWidth = imageWidth - FILES_WIDTH - MARGIN * 3;
-        var editorHeight = imageHeight - HEADER_HEIGHT - MARGIN * 2;
+        var editorAreaWidth = imageWidth - FILES_WIDTH - MARGIN * 3;
+        var editorAreaHeight = imageHeight - HEADER_HEIGHT - MARGIN * 2;
+        // MultiLineEditBox renders its scrollbar to the right of its bounds and
+        // its character count below them. Reserve both areas inside our panel.
+        var editorWidth = editorAreaWidth - EDITOR_DECORATION_RIGHT;
+        var editorHeight = editorAreaHeight - EDITOR_DECORATION_BOTTOM;
         scriptBox = new MultiLineEditBox(
                 font, editorX, editorY, editorWidth, editorHeight,
                 Component.translatable("gui.appliedfactory.script"),

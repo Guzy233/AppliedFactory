@@ -79,6 +79,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         IInWorldGridNodeHost, IPowerChannelState, FactoryProgram.Host {
     private static final double MAX_POWER_TRANSFER_PER_NETWORK = 1_024.0D;
     private static final double POWER_EPSILON = 0.0001D;
+    private static final int PROGRAM_STARTUP_QUIET_TICKS = 20;
     private static final String ESCROW_NBT_KEY = "FactoryEscrow";
     /** Persistent key is "ErrorSubscribers" for legacy saves; the set now means log subscribers. */
     private static final String ERROR_SUBSCRIBERS_NBT_KEY = "ErrorSubscribers";
@@ -108,6 +109,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
      */
     private FactoryProgram program;
     private boolean programInitialized;
+    private long programLoadNotBeforeTick = Long.MAX_VALUE;
     private boolean programStoreResolved;
     private BusTopology busTopology = BusTopology.EMPTY;
     private boolean busTopologyDirty = true;
@@ -139,9 +141,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             networkNodes.values().forEach(node -> node.create(level, worldPosition));
             if (!level.isClientSide && !programInitialized) {
                 reloadControllerProgramFromStore();
-                programInitialized = true;
-                program = createProgram(compiledControllerProgram);
-                invalidatePatterns();
+                scheduleProgramInitialization();
             }
         }
     }
@@ -166,6 +166,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
             program = null;
         }
         programInitialized = false;
+        programLoadNotBeforeTick = Long.MAX_VALUE;
     }
 
     @Override
@@ -189,13 +190,14 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 logSubscribers.add(subscriber.getUUID(ERROR_SUBSCRIBER_ID_NBT_KEY));
             }
         }
-        if (level instanceof ServerLevel) {
-            program = createProgram(compiledControllerProgram);
-            programInitialized = true;
-        } else {
-            program = null;
-            programInitialized = false;
+        // AE nodes and neighboring bus chunks are not ready while block-entity
+        // NBT is loading. Evaluation is deferred until the topology is quiet.
+        if (program != null) {
+            program.discard();
         }
+        program = null;
+        programInitialized = false;
+        programLoadNotBeforeTick = Long.MAX_VALUE;
         networkNodes.values().forEach(node -> node.loadFromNBT(tag));
         invalidateBusTopology();
         invalidatePatterns();
@@ -309,6 +311,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         ensureControllerProgramStored();
         program = result.program();
         programInitialized = true;
+        programLoadNotBeforeTick = Long.MAX_VALUE;
         reportedScriptFailures.clear();
         invalidatePatterns();
         markChangedAndSync();
@@ -665,6 +668,8 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         invalidateBusTopology();
         if (program != null) {
             program.markEnvironmentChanged();
+        } else if (!programInitialized) {
+            scheduleProgramInitialization();
         }
     }
 
@@ -842,6 +847,7 @@ public final class FactoryControllerBlockEntity extends BlockEntity
         if (!level.isClientSide) {
             // 为子网供电
             controller.bridgePowerBetweenNetworks();
+            controller.initializeProgramWhenReady();
             // 推进脚本任务（挂起 job 恢复/重试/终结、被动处理器、资源回收）
             if (controller.program != null) {
                 controller.program.step();
@@ -849,6 +855,27 @@ public final class FactoryControllerBlockEntity extends BlockEntity
                 controller.recoverAllEscrows();
             }
         }
+    }
+
+    private void scheduleProgramInitialization() {
+        if (level instanceof ServerLevel) {
+            programLoadNotBeforeTick = level.getGameTime() + PROGRAM_STARTUP_QUIET_TICKS;
+        }
+    }
+
+    private void initializeProgramWhenReady() {
+        if (programInitialized || !(level instanceof ServerLevel)
+                || level.getGameTime() < programLoadNotBeforeTick) {
+            return;
+        }
+        reloadControllerProgramFromStore();
+        // Resolve the first complete bus snapshot before top-level expressions
+        // such as network(...).buses.find(...) are evaluated.
+        busTopology();
+        program = createProgram(compiledControllerProgram);
+        programInitialized = true;
+        programLoadNotBeforeTick = Long.MAX_VALUE;
+        invalidatePatterns();
     }
 
     /** Recovery must not depend on the current script being valid or loadable. */

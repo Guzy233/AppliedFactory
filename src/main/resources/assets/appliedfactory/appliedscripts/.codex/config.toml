@@ -1,0 +1,6 @@
+# Project-local Codex MCP configuration. Codex loads this file when the
+# appliedscripts workspace is opened as a trusted project.
+project_doc_fallback_filenames = ["agents.md"]
+
+[mcp_servers.appliedfactory]
+url = "http://127.0.0.1:39291/mcp"
